@@ -96,7 +96,7 @@ export default function Catalogue({ categories, category, setCategory, refreshKe
           const { product, metadata } = latest;
           if (product.status !== "published") {
             if (product.status !== "draft" || product.updated_at !== item.updated_at) throw new Error("Draft changed. Open it to review the latest version.");
-            if (!metadata || metadata.qualityFlags?.length) throw new Error("Open the draft to resolve its artwork flags.");
+            if (!metadata || metadata.qualityFlags?.length) throw new Error("AI image-check flags: "+(metadata?.qualityFlags?.join("; ")||"Analysis is not ready")+". Open review to inspect the artwork.");
             const chosen = metadata.categoriesApprovedAt ? metadata.approvedCategories : categorySuggestions(metadata, categories);
             if (!chosen?.length) throw new Error("Open the draft to choose a category.");
             let updatedAt = product.updated_at;
@@ -161,7 +161,7 @@ export default function Catalogue({ categories, category, setCategory, refreshKe
             <small className="muted" style={{ display: "block" }}>{categoriesForDraft.length ? categoriesForDraft.join(" · ") : item.category}</small></td>
           <td>{money(item.price_cents)}</td>
           <td><span className={`quality-tag ${item.status === "published" ? "pass" : ""}`}>{item.status.toUpperCase()}</span>
-            {item.status === "draft" && metadata?.qualityFlags?.length > 0 && <small className="low-dpi-note">Review AI artwork flags</small>}
+            {item.status === "draft" && metadata?.qualityFlags?.length > 0 && <div className="low-dpi-note"><strong>AI review needed</strong><ul>{metadata.qualityFlags.map((flag:string,index:number)=><li key={index}>{flag}</li>)}</ul></div>}
             {item.quality === "approved_low_dpi" && <small className="low-dpi-note">Low DPI · owner approved</small>}</td>
           <td><button type="button" className="text-link" disabled={disabled} onClick={() => onReview(item.id)}>Open review <ArrowUpRight size={14} /></button></td>
         </tr>;
