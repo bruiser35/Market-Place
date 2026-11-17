@@ -1,3 +1,4 @@
+import {suggestEtsyPaths} from './etsy-taxonomy';
 import type {Bindings} from './api';
 import {authenticateBridge,limitedBody,sha256,sourceIdFor,validateManifest,validateMetadata,validateVector,EMBEDDING_MODEL,MAX_PNG_BYTES,searchDocument,type ImportManifest} from './bridge-contract';
 import {inspectPng} from './png-inspection';
@@ -28,13 +29,14 @@ export async function receiveDesign(request:Request,env:Bindings){
   if(action==='metadata'&&method==='PUT'){
    if(row.metadata_json)return receipt(db,row);
    const payload=JSON.parse(new TextDecoder().decode(bytes)),metadata=validateMetadata(payload.metadata),vector=validateVector(payload.vector);if(payload.model!==EMBEDDING_MODEL||!(await readCategories(env.DB)).slice(1).includes(metadata.category))throw new ImportError('Metadata category or embedding model is invalid.');
+   (metadata as any).etsyListingRecommendations=await suggestEtsyPaths(env,metadata);
    await db.prepare('UPDATE design_imports SET metadata_json=?,vector_json=?,model=?,updated_at=?,last_error=NULL WHERE id=? AND metadata_json IS NULL').bind(JSON.stringify({...metadata,metadataModel:typeof payload.metadataModel==='string'?payload.metadataModel.slice(0,80):'gpt-6-luna'}),JSON.stringify(vector),payload.model,Date.now(),row.id).run();return receipt(db,await db.prepare('SELECT * FROM design_imports WHERE id=?').bind(row.id).first());
   }
   if(isFile&&method==='PUT'){
    const side=match[3],file=manifest.files.find(f=>f.side===side);if(!file||bytes.length!==file.bytes||await sha256(bytes)!==file.sha256)throw new ImportError('File differs from the approved manifest.');
    const old=await db.prepare('SELECT id FROM design_import_files WHERE import_id=? AND side=?').bind(row.id,side).first();if(old)return receipt(db,row);
    if(!await rateLimit(db,'import:files',30))throw new ImportError('Upload rate limit reached.',429);
-   const {report,preview}=await inspectPng(bytes,file.widthMm,file.heightMm,file.nativeDpi),key=`design-imports/${row.id}/${side}.png`,previewKey=`design-imports/${row.id}/${side}-preview.png`;
+   const {report,preview}=await inspectPng(bytes,file.widthMm,file.heightMm,file.nativeDpi,{dimensionBasis:file.dimensionBasis}),key=`design-imports/${row.id}/${side}.png`,previewKey=`design-imports/${row.id}/${side}-preview.png`;
    await env.FILES.put(key,bytes,{httpMetadata:{contentType:'image/png'}});await env.FILES.put(previewKey,preview,{httpMetadata:{contentType:'image/png'}});
    await db.prepare('INSERT OR IGNORE INTO design_import_files(id,import_id,side,object_key,preview_key,sha256,report_json,size,preview_size) VALUES(?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),row.id,side,key,previewKey,file.sha256,JSON.stringify(report),bytes.length,preview.length).run();return receipt(db,row);
   }
