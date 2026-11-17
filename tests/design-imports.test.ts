@@ -2,7 +2,7 @@ import {test,before,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile,readdir} from 'node:fs/promises';
 import {Miniflare} from 'miniflare';
-import {encode} from 'fast-png';
+import {encode,decode} from 'fast-png';
 import {handleApi,type Bindings} from '../lib/api';
 import {bridgeHeaders,sha256,sourceIdFor,EMBEDDING_DIMENSIONS,EMBEDDING_MODEL,type ImportManifest} from '../lib/bridge-contract';
 import {with300Dpi} from '../lib/artwork';
@@ -97,4 +97,12 @@ test('owner can approve low DPI with a persistent warning while other quality fa
  const file=await env.DB.prepare("SELECT report_json FROM assets WHERE product_id=? AND role='front'").bind(id).first<any>();assert.ok(JSON.parse(file.report_json).dpi<300,'actual resolution remains unchanged');
  const publicDetail=await (await handleApi(new Request(`https://printwear.test/api/products/${id}`),env)).json() as any;assert.equal(publicDetail.product.quality,'approved_low_dpi');
  const unsafe=await make(true),rejected=await handleApi(new Request(`https://printwear.test/api/admin/products/${unsafe}`,{method:'PATCH',headers:admin,body:JSON.stringify({action:'publish',reviewed:true,ownOriginal:true})}),env);assert.equal(rejected.status,400);
+});
+
+test('transparent display variants preserve alpha, watermark the artwork and protect masters',async()=>{
+ const made=await handleApi(new Request('https://printwear.test/api/admin/products',{method:'POST',headers:admin,body:JSON.stringify({title:'Transparent preview fixture',category:'Animals',type:'single',priceCents:250})}),env),{id}=await made.json() as any;
+ const source=png(),digest=await sha256(source),report=(await inspectPng(source,30,30,600)).report;const matte=new Uint8Array(400*400*4);for(let p=0;p<400*400;p++)matte.set([233,236,223,255],p*4);const oldPreview=encode({width:400,height:400,data:matte,channels:4,depth:8});let previewId='';for(const role of ['source_front','front','preview_front']){const saved=await handleApi(new Request(`https://printwear.test/api/admin/products/${id}/assets/${role}`,{method:'PUT',headers:{...admin,'content-type':'image/png','x-artwork-report':JSON.stringify(report)},body:(role==='preview_front'?oldPreview:source) as unknown as BodyInit}),env);assert.equal(saved.status,201);if(role==='preview_front')previewId=(await saved.json() as any).id}
+ const variant=()=>handleApi(new Request(`https://printwear.test/api/assets/${previewId}?transparent=1`),env);assert.equal((await variant()).status,404,'draft display variant remains private');await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();
+ const result=await variant();assert.equal(result.status,200);const decoded=decode(new Uint8Array(await result.arrayBuffer()));assert.equal(decoded.channels,4);assert.equal(decoded.data[3],0);assert.deepEqual(Array.from(decoded.data.slice(0,4)),[0,0,0,0]);let changed=0;for(let p=0;p<decoded.width*decoded.height;p++)if(decoded.data[p*4+3]>0&&decoded.data[p*4]!==220)changed++;assert.ok(changed>0,'watermark is embedded inside the artwork');
+ const original=await env.DB.prepare("SELECT id,object_key FROM assets WHERE product_id=? AND role='front'").bind(id).first<any>();assert.equal((await handleApi(new Request(`https://printwear.test/api/assets/${original.id}?transparent=1`),env)).status,404);assert.equal(await sha256(new Uint8Array(await (await env.FILES.get(original.object_key))!.arrayBuffer())),digest,'production bytes remain unchanged');assert.equal((await variant()).status,200,'cached transparent preview remains available');
 });

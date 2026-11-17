@@ -1,5 +1,6 @@
 import {readCategories,addCategory} from './categories';
 import {validEtsyPath,ETSY_TAXONOMY} from './etsy-taxonomy-data';
+import {inspectPng} from './png-inspection';
 import {publicationQuality} from './publication-quality';
 import {identity,sameOrigin} from "./auth";
 import {CATEGORIES,DEFAULT_GUIDELINES,DEFAULT_PRICES,cleanText,parsePrice,validId} from "./catalogue";
@@ -133,6 +134,13 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
   const row=await db.prepare("SELECT a.*,p.status FROM assets a JOIN products p ON p.id=a.product_id WHERE a.id=?").bind(assetGet[1]).first<any>();if(!row)return error("File not found.",404);
   const publicPreview=row.role.startsWith("preview_")&&row.status==="published";
   if(!publicPreview&&!user?.admin)return error("File not found.",404);
+  if(url.searchParams.get('transparent')==='1'&&row.role.startsWith('preview_')){
+   const side=row.role.slice('preview_'.length);if(!['front','back'].includes(side))return error('Preview not found.',404);
+   const production=await db.prepare('SELECT object_key,sha256,report_json FROM assets WHERE product_id=? AND role=?').bind(row.product_id,side).first<any>();if(!production)return error('Cleaned artwork preview is unavailable.',404);
+   const small=url.searchParams.get('detail')==='small',edge=small?320:1440;const key=`display-previews/transparent-area-v2/${production.sha256}-${edge}.png`;let cached=await env.FILES.get(key);
+   if(!cached){const master=await env.FILES.get(production.object_key);if(!master)return error('Cleaned artwork preview is unavailable.',404);const dimensions=JSON.parse(production.report_json);const {preview}=await inspectPng(new Uint8Array(await master.arrayBuffer()),dimensions.widthMm,dimensions.heightMm,dimensions.dpi,{maxEdge:edge,transparentBackground:true,watermarkOpacity:small?.18:.45,dimensionBasis:dimensions.dimensionBasis});await env.FILES.put(key,preview,{httpMetadata:{contentType:'image/png'}});cached=await env.FILES.get(key)}
+   if(!cached)return error('Preview could not be generated.',503);return new Response(cached.body,{headers:{'content-type':'image/png','cache-control':publicPreview?'public, max-age=3600':'private, no-store','x-content-type-options':'nosniff'}});
+  }
   const object=await env.FILES.get(row.object_key);if(!object)return error("File not found.",404);return new Response(object.body,{headers:{"content-type":row.mime,"cache-control":publicPreview?"public, max-age=3600":"private, no-store","x-content-type-options":"nosniff"}})
  }
  if(path==="account/orders"&&method==="GET"){if(!user)return error("Sign in to view your purchases.",401);const rows=await db.prepare("SELECT id,status,total_cents,currency,created_at,paid_at FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 100").bind(user.id).all();return json({items:rows.results})}

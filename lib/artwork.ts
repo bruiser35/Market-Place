@@ -1,6 +1,6 @@
 import {borderBlemishes} from "./border-blemishes";
 export type Raster={width:number;height:number;data:Uint8ClampedArray};
-export type Quality={width:number;height:number;visibleWidth:number;visibleHeight:number;widthMm:number;heightMm:number;dpi:number;transparentPixels:number;visiblePixels:number;changedPixels:number;removedBackdrop:boolean;issues:string[];ready:boolean;version:string;cleanup?:{profile:string;haloThreshold:number;speckLimitMm:number;haze:number;specks:number;edges:number;backdrop:number}};
+export type Quality={width:number;height:number;visibleWidth:number;visibleHeight:number;widthMm:number;heightMm:number;dpi:number;transparentPixels:number;visiblePixels:number;changedPixels:number;removedBackdrop:boolean;issues:string[];ready:boolean;version:string;dimensionBasis?:'canvas'|'visible';cleanup?:{profile:string;haloThreshold:number;speckLimitMm:number;haze:number;specks:number;edges:number;backdrop:number}};
 export function inspectArtwork(r:Raster,widthMm:number,changedPixels=0,removedBackdrop=false,physicalHeightMm?:number):Quality{
  let left=r.width,top=r.height,right=-1,bottom=-1,transparentPixels=0,visiblePixels=0;
  for(let p=0;p<r.width*r.height;p++){const a=r.data[p*4+3];if(a===0)transparentPixels++;if(a>0){visiblePixels++;const x=p%r.width,y=Math.floor(p/r.width);left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y)}}
