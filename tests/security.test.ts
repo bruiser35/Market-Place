@@ -1,6 +1,6 @@
 import {test,before,after} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,readdir} from 'node:fs/promises';
 import {Miniflare} from 'miniflare';
 import {encode} from 'fast-png';
 import {handleApi,type Bindings} from '../lib/api';
@@ -11,7 +11,7 @@ const buyer={'oai-authenticated-user-id':'buyer-id','oai-authenticated-user-emai
 async function call(path:string,method='GET',data?:unknown,identity:Record<string,string>=admin,origin='https://printwear.test'){
  return handleApi(new Request('https://printwear.test/api/'+path,{method,headers:{...identity,origin,'content-type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)}),env);
 }
-before(async()=>{mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-05-01',d1Databases:['DB'],r2Buckets:['FILES']});env={DB:await mf.getD1Database('DB') as unknown as D1Database,FILES:await mf.getR2Bucket('FILES') as unknown as R2Bucket,ADMIN_EMAILS:'owner@example.com'};const sql=await readFile(new URL('../drizzle/0000_simple_sumo.sql',import.meta.url),'utf8');for(const statement of sql.split('--> statement-breakpoint'))if(statement.trim())await env.DB.exec(statement.trim().replace(/\n/g,' '))});
+before(async()=>{mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-05-01',d1Databases:['DB'],r2Buckets:['FILES']});env={DB:await mf.getD1Database('DB') as unknown as D1Database,FILES:await mf.getR2Bucket('FILES') as unknown as R2Bucket,ADMIN_EMAILS:'owner@example.com'};for(const file of (await readdir(new URL('../drizzle/',import.meta.url))).filter(f=>f.endsWith('.sql')).sort()){const sql=await readFile(new URL('../drizzle/'+file,import.meta.url),'utf8');for(const statement of sql.split('--> statement-breakpoint'))if(statement.trim())await env.DB.exec(statement.trim().replace(/\n/g,' '))}});
 after(async()=>{await mf?.dispose()});
 test('admin API denies anonymous and ordinary customers',async()=>{assert.equal((await call('admin/products','GET',undefined,{})).status,403);assert.equal((await call('admin/products','GET',undefined,buyer)).status,403)});
 test('cross-origin changes are rejected even for the owner',async()=>{assert.equal((await call('admin/settings','PUT',{guidelines:'evil'},admin,'https://evil.test')).status,403)});

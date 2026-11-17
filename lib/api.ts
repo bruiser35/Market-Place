@@ -1,6 +1,10 @@
 import {identity,sameOrigin} from "./auth";
 import {CATEGORIES,DEFAULT_GUIDELINES,DEFAULT_PRICES,cleanText,parsePrice,validId} from "./catalogue";
-export type Bindings={DB:D1Database;FILES:R2Bucket;ADMIN_EMAILS?:string};
+import {receiveDesign} from './design-imports';
+import {semanticResults,rateLimit,indexProduct,indexStatements,queryEmbedding} from './semantic-search';
+import {validateMetadata,searchDocument,sha256} from './bridge-contract';
+import {analyseProduct} from './analyse-product';
+export type Bindings={DB:D1Database;FILES:R2Bucket;ADMIN_EMAILS?:string;PRINTWEAR_IMPORT_SECRET?:string;PTP_EMBEDDING_URL?:string;PRINTWEAR_METADATA_MODEL?:string;PRINTWEAR_AI_REQUESTS_PER_DAY?:string;PRINTWEAR_ANALYSES_PER_DAY?:string};
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{"cache-control":"private, no-store"}});
 const error=(message:string,status=400)=>json({error:message},status);
 const uuid=()=>crypto.randomUUID();
@@ -9,8 +13,9 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/?/,""),method=request.method;
  const user=identity(request,env.ADMIN_EMAILS||"");
  const db=env.DB;
+ if(path==='admin/design-imports'||path.startsWith('admin/design-imports/'))return receiveDesign(request,env);
  if(!["GET","HEAD"].includes(method)&&!sameOrigin(request))return error("This request must come from PrintWear.",403);
- if(path==="session"&&method==="GET")return json({user,paymentsEnabled:false,searchMode:"catalogue"});
+ if(path==="session"&&method==="GET")return json({user,paymentsEnabled:false,searchMode:env.PTP_EMBEDDING_URL?'semantic':'catalogue'});
  if(path==="health"&&method==="GET"){try{await db.prepare("SELECT key FROM settings LIMIT 1").first();return json({status:"ok",database:true,storage:!!env.FILES,paymentsEnabled:false})}catch{return error("Database setup is not complete.",503)}}
  if(path==="checkout")return error("PayPal is not connected yet. No payment has been taken.",503);
  if(path.startsWith("admin/")&&!user?.admin)return error("Administrator access is required.",403);
@@ -22,15 +27,25 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
   if(method==="GET")return json(await settings());
   if(method==="PUT"){const b=await body(request);const pairs:Array<[string,string]>=[];if(b.prices){const prices={single:parsePrice(b.prices.single),pair:parsePrice(b.prices.pair),bundle:parsePrice(b.prices.bundle)};pairs.push(["prices",JSON.stringify(prices)])}if(b.guidelines!==undefined){const text=cleanText(b.guidelines,12000);if(!text)throw new Error("Guidelines cannot be empty.");pairs.push(["guidelines",text])}if(!pairs.length)throw new Error("Choose settings to update.");await db.batch([...pairs.map(([k,v])=>db.prepare("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(k,v,Date.now())),log("settings.updated")]);return json({ok:true})}
  }
- if(path==="products"&&method==="GET"){
-  const q=(url.searchParams.get("q")||"").trim().slice(0,120),category=url.searchParams.get("category")||"All artwork",type=url.searchParams.get("type")||"all",page=Math.max(1,Math.min(10000,Number(url.searchParams.get("page"))||1));
-  const words=q.toLowerCase().split(/\s+/).filter(w=>w.length>2&&!['want','with','some','design','designs','looking','please','shirt','that','the','and','for'].includes(w)).slice(0,8).map(w=>w.slice(0,40));
+ if((path==="products"&&method==="GET")||(path==='search'&&method==='POST')){
+  const input=method==='POST'?await body(request):Object.fromEntries(url.searchParams);const params=new URLSearchParams(Object.entries(input).filter(([,v])=>typeof v==='string'||typeof v==='number').map(([k,v])=>[k,String(v)]));
+  const q=(params.get("q")||"").trim().slice(0,300),category=params.get("category")||"All artwork",type=params.get("type")||"all",page=Math.floor(Math.max(1,Math.min(10000,Number(params.get("page"))||1)));
+  const words=q.toLowerCase().replace(/[.,!?]/g,' ').split(/\s+/).filter(w=>w.length>2&&!['t-shirt','t-shirts','tee','tees','digital','image','images','print','show','find','want','with','some','design','designs','artwork','prints','looking','please','shirt','that','the','and','for'].includes(w)).slice(0,8).map(w=>w.slice(0,40));
   const clauses=["p.status='published'"];const args:unknown[]=[];
   if(category!=="All artwork"){clauses.push("p.category=?");args.push(category)}if(type!=="all"){clauses.push("p.type=?");args.push(type)}
-  for(const word of words){clauses.push("lower(p.title||' '||p.description||' '||p.tags) LIKE ? ESCAPE '\\'");args.push('%'+word.replace(/[\\%_]/g,"\\$&")+'%')}
+  let semantic:Array<{id:string;score:number}>=[],mode='keyword',searchNotice:string|null=null;
+  if(path==='search'&&q&&env.PTP_EMBEDDING_URL){
+   const key=await sha256(user?.id||request.headers.get('cf-connecting-ip')||'anonymous');
+   if(!await rateLimit(db,'search:'+key.slice(0,20),20)||!await rateLimit(db,'search:global',60))return error('Search is busy. Try again in a minute.',429);
+   try{semantic=await semanticResults(env,q,{category,type})||[];mode='semantic'}catch{searchNotice='AI search is temporarily unavailable. Showing keyword matches.'}
+  }
+  const text="lower(p.title||' '||p.description||' '||p.tags||' '||coalesce((SELECT search_text FROM artwork_metadata m WHERE m.product_id=p.id),''))";
+  const matches:string[]=[];for(const word of words){matches.push(`${text} LIKE ? ESCAPE '\\'`);args.push('%'+word.replace(/[\\%_]/g,"\\$&")+'%')}
+  if(semantic.length){matches.push(`p.id IN (${semantic.map(()=>'?').join(',')})`);args.push(...semantic.map(r=>r.id))}
+  if(matches.length)clauses.push('('+matches.join(' OR ')+')');
   const where=clauses.join(" AND ");const select=`SELECT p.*,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p WHERE ${where}`;
-  const sort=url.searchParams.get('sort');const order=sort==='low'?'p.price_cents ASC,p.updated_at DESC':sort==='high'?'p.price_cents DESC,p.updated_at DESC':'p.updated_at DESC';
-  const [items,total]=await Promise.all([db.prepare(select+` ORDER BY ${order} LIMIT 24 OFFSET ?`).bind(...args,Math.floor((page-1)*24)).all(),db.prepare(`SELECT count(*) count FROM products p WHERE ${where}`).bind(...args).first<{count:number}>()]);return json({items:items.results,total:total?.count||0,page})
+  const sort=params.get('sort'),rank=semantic.length?'CASE p.id '+semantic.map(r=>`WHEN '${r.id}' THEN ${Number(r.score).toFixed(6)}`).join(' ')+' ELSE 0 END DESC,':'';const order=sort==='low'?'p.price_cents ASC,p.updated_at DESC':sort==='high'?'p.price_cents DESC,p.updated_at DESC':rank+'p.updated_at DESC';
+  const [items,total]=await Promise.all([db.prepare(select+` ORDER BY ${order} LIMIT 24 OFFSET ?`).bind(...args,(page-1)*24).all(),db.prepare(`SELECT count(*) count FROM products p WHERE ${where}`).bind(...args).first<{count:number}>()]);return json({items:items.results,total:total?.count||0,page,mode,notice:searchNotice})
  }
  const productMatch=path.match(/^products\/([a-zA-Z0-9-]+)$/);
  if(productMatch&&method==="GET"){const row=await db.prepare("SELECT * FROM products WHERE id=? AND status='published'").bind(productMatch[1]).first();if(!row)return error("Artwork not found.",404);const a=await db.prepare("SELECT id,role,width,height FROM assets WHERE product_id=? AND role LIKE 'preview_%'").bind(productMatch[1]).all();return json({product:row,assets:a.results})}
@@ -41,16 +56,30 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
   if(method==="POST"){const b=await body(request),title=cleanText(b.title,150),category=cleanText(b.category,80),type=cleanText(b.type,10);if(!title||!CATEGORIES.slice(1).includes(category)||!["single","pair","bundle"].includes(type))throw new Error("Choose a title, category and product format.");const id=uuid(),now=Date.now();await db.batch([db.prepare("INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'draft','pending',0,?,?)").bind(id,title,cleanText(b.description,2500),category,type,parsePrice(b.priceCents),cleanText(b.tags,500),now,now),log("product.created",id)]);return json({id},201)}
  }
  const adminProduct=path.match(/^admin\/products\/([a-zA-Z0-9-]+)$/);
+ const analysisMatch=path.match(/^admin\/products\/([a-zA-Z0-9-]+)\/analyse$/);
+ if(analysisMatch&&method==='POST'){const b=await body(request);return json(await analyseProduct(env,analysisMatch[1],cleanText(b.prompt,8000),url.origin))}
  if(adminProduct){const id=adminProduct[1],p=await db.prepare("SELECT * FROM products WHERE id=?").bind(id).first<any>();if(!p)return error("Draft not found.",404);
-  if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();return json({product:p,assets:a.results})}
+  if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();const m=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();return json({product:p,assets:a.results,metadata:m?JSON.parse(m.metadata_json):null})}
   if(method==="PATCH"){const b=await body(request);if(b.action==="archive"){await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=?").bind(Date.now(),id),log("product.archived",id)]);return json({ok:true})}
+   if(b.action==='metadata'){
+    const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
+    if(p.status!=='draft')return error('Only unpublished drafts can be edited.',409);
+    const supplied=validateMetadata(b.metadata);if(!CATEGORIES.slice(1).includes(supplied.category))throw new Error('Choose an existing main category.');
+    const previous=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();const old=previous?JSON.parse(previous.metadata_json):{};
+    const allowed=['title','description','category','secondaryCategories','subjects','objects','styles','primaryColours','secondaryColours','audience','ageGroup','occasions','moods','themes','keywords','synonyms','garments','personalisation','uncertainties','qualityFlags'];const metadata={...old,...Object.fromEntries(allowed.map(k=>[k,(supplied as any)[k]]))};
+    const document=searchDocument(metadata),vector=await queryEmbedding(env,document),now=Date.now();
+    await db.batch([db.prepare('UPDATE products SET title=?,description=?,category=?,tags=?,price_cents=?,updated_at=? WHERE id=?').bind(metadata.title,metadata.description,metadata.category,[...metadata.keywords,...metadata.synonyms].join(', ').slice(0,500),b.priceCents===undefined?p.price_cents:parsePrice(b.priceCents),now,id),db.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,received_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(product_id) DO UPDATE SET metadata_json=excluded.metadata_json,search_text=excluded.search_text,updated_at=excluded.updated_at').bind(id,JSON.stringify(metadata),document,now,now),...indexStatements(db,id,vector,await sha256(document)),log('metadata.updated',id)]);return json({ok:true});
+   }
    if(b.action==="publish"){
+    const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish before approval.',409);
     if(!b.reviewed||!b.ownOriginal)throw new Error("Confirm visual review and original artwork ownership.");
     const {results:a}=await db.prepare("SELECT role,width,height,report_json FROM assets WHERE product_id=?").bind(id).all<any>();
     const sides=p.type==="pair"?["front","back"]:p.type==="single"?a.some(x=>x.role==="front")?["front"]:["back"]:[];
     if(!sides.length)throw new Error("Bundle publication will be enabled with the first verified bundle.");
     for(const side of sides){const file=a.find(x=>x.role===side),preview=a.find(x=>x.role===`preview_${side}`),source=a.find(x=>x.role===`source_${side}`);if(!file||!preview||!source)throw new Error(`Missing ${side} master, cleaned PNG or preview.`);const r=JSON.parse(file.report_json);if(!r.ready||r.dpi<299.5||r.transparentPixels<=0||r.visiblePixels<=0||r.widthMm>355)throw new Error(`The ${side} artwork needs quality review or more resolution.`)}
-    await db.batch([db.prepare("UPDATE products SET status='published',quality='approved',rights_confirmed=1,updated_at=? WHERE id=?").bind(Date.now(),id),log("product.approved",id)]);return json({ok:true})
+    const attached=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(attached&&JSON.parse(attached.metadata_json).qualityFlags?.length)throw new Error('Review and resolve the AI image-check flags before approval.');if(env.PTP_EMBEDDING_URL){if(!attached)throw new Error('Run AI Catalogue analysis and review the saved metadata before approval.');await indexProduct(env,p,JSON.parse(attached.metadata_json))}
+    if(p.status==='published')return json({ok:true,alreadyPublished:true});
+    const approvedAt=Math.max(Date.now(),p.updated_at+1);const committed=await db.batch([db.prepare("UPDATE products SET status='published',quality='approved',rights_confirmed=1,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(approvedAt,id,p.updated_at,'analysis:'+id,Date.now()),log("product.approval_requested",id)]);if(!committed[0].meta.changes)return error('The draft changed during review. Reopen it before approving.',409);await log('product.approved',id).run();return json({ok:true})
    }return error("Unknown catalogue action.")
   }
  }
