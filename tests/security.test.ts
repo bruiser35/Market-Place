@@ -120,3 +120,17 @@ test('removing an image from admin hides only the admin row and preserves its cu
  const adminRows=await (await call('admin/products?ids='+id)).json() as any;assert.equal(adminRows.items.length,0);
  assert.equal((await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>()).status,'published');
 });
+test('remove from one category preserves other customer listings and rejects removing the last category',async()=>{
+ const made=await call('admin/products','POST',{title:'Multiple category fixture',category:'Animals',type:'single',priceCents:250}),{id}=await made.json() as any;
+ await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();
+ await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,received_at,updated_at) VALUES(?,?,1,1)').bind(id,JSON.stringify({category:'Animals',approvedCategories:['Animals','Typography'],qualityFlags:[]})).run();
+ const snapshot=await (await call('admin/products/'+id)).json() as any;
+ const payload={action:'remove-category',category:'Animals',updatedAt:snapshot.product.updated_at};
+ assert.equal((await call('admin/products/'+id,'PATCH',payload,buyer)).status,403);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...payload,updatedAt:0})).status,409);
+ assert.equal((await call('admin/products/'+id,'PATCH',payload)).status,200);
+ const remaining=await (await call('admin/products/'+id)).json() as any;
+ assert.equal(remaining.product.status,'published');assert.equal(remaining.product.category,'Typography');assert.deepEqual(remaining.metadata.approvedCategories,['Typography']);
+ assert.equal((await call('products/'+id)).status,200);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...payload,category:'Typography',updatedAt:remaining.product.updated_at})).status,400);
+});

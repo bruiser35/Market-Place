@@ -104,6 +104,19 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     if(!['draft','published','archived'].includes(p.status))return error('This listing is already in private trash.',409);
     const removed=await db.batch([db.prepare("UPDATE products SET status='deleted',updated_at=? WHERE id=? AND status IN ('draft','published','archived') AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(Math.max(Date.now(),p.updated_at+1),id,b.updatedAt,'analysis:'+id,Date.now()),log('product.trash_requested',id)]);if(!removed[0].meta.changes)return error('The draft changed or analysis is still running. Reopen it before deleting.',409);return json({ok:true,trashed:true,filesRetained:true});
    }
+   if(b.action==='remove-category'){
+    if(!['draft','published','archived'].includes(p.status))return error('This listing is in private trash.',409);
+    const category=approvedCategories([b.category],await readCategories(db))[0];
+    const row=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();
+    const metadata=row?JSON.parse(row.metadata_json):{},assigned=[...new Set([p.category,...(metadata.approvedCategories||[])])] as string[];
+    if(!assigned.includes(category))return error('This image is not listed in that category.',409);
+    const remaining=assigned.filter(value=>value!==category);
+    if(!remaining.length)return error('This is the image’s only category. Move it to another category first.',400);
+    const now=Math.max(Date.now(),p.updated_at+1),next={...metadata,category:remaining[0],secondaryCategories:remaining.slice(1),suggestedCategories:(metadata.suggestedCategories||remaining).filter((value:string)=>value!==category),approvedCategories:remaining,categoriesApprovedAt:new Date(now).toISOString()};
+    const changed=await db.batch([db.prepare("UPDATE products SET category=?,updated_at=? WHERE id=? AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(remaining[0],now,id,b.updatedAt,'analysis:'+id,Date.now()),...(row?[db.prepare('UPDATE artwork_metadata SET metadata_json=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(next),now,id,id,now)]:[]),log('product.category_removed',id)]);
+    if(!changed[0].meta.changes)return error('The listing changed or analysis is running. Refresh and try again.',409);
+    return json({ok:true,categories:remaining,catalogueRetained:true});
+   }
    if(b.action==='move'){
     if(!['draft','published','archived'].includes(p.status))return error('Restore this listing before moving it.',409);
     const category=approvedCategories([b.category],await readCategories(db))[0];

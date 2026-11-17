@@ -164,7 +164,7 @@ export default function Catalogue({ categories, category, setCategory, refreshKe
           <td><span className={`quality-tag ${item.status === "published" ? "pass" : ""}`}>{item.status.toUpperCase()}</span>
             {item.status === "draft" && metadata?.qualityFlags?.length > 0 && <div className="low-dpi-note"><strong>AI review needed</strong><ul>{metadata.qualityFlags.map((flag:string,index:number)=><li key={index}>{flag}</li>)}</ul></div>}
             {item.quality === "approved_low_dpi" && <small className="low-dpi-note">Low DPI · owner approved</small>}</td>
-          <td><button type="button" className="text-link" disabled={disabled} onClick={() => onReview(item.id)}>Open review <ArrowUpRight size={14} /></button><ArtworkActions allowHide id={item.id} title={item.title} categories={categories} disabled={disabled} onChanged={()=>setReload(v=>v+1)}/></td>
+          <td><button type="button" className="text-link" disabled={disabled} onClick={() => onReview(item.id)}>Open review <ArrowUpRight size={14} /></button><ArtworkActions currentCategory={category} allowHide id={item.id} title={item.title} categories={categories} disabled={disabled} onChanged={()=>setReload(v=>v+1)}/></td>
         </tr>;
       })}</tbody>
     </table></div>}
