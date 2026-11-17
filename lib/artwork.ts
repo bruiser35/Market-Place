@@ -1,10 +1,10 @@
 import {borderBlemishes} from "./border-blemishes";
 export type Raster={width:number;height:number;data:Uint8ClampedArray};
 export type Quality={width:number;height:number;visibleWidth:number;visibleHeight:number;widthMm:number;heightMm:number;dpi:number;transparentPixels:number;visiblePixels:number;changedPixels:number;removedBackdrop:boolean;issues:string[];ready:boolean;version:string;cleanup?:{profile:string;haloThreshold:number;speckLimitMm:number;haze:number;specks:number;edges:number;backdrop:number}};
-export function inspectArtwork(r:Raster,widthMm:number,changedPixels=0,removedBackdrop=false):Quality{
+export function inspectArtwork(r:Raster,widthMm:number,changedPixels=0,removedBackdrop=false,physicalHeightMm?:number):Quality{
  let left=r.width,top=r.height,right=-1,bottom=-1,transparentPixels=0,visiblePixels=0;
  for(let p=0;p<r.width*r.height;p++){const a=r.data[p*4+3];if(a===0)transparentPixels++;if(a>0){visiblePixels++;const x=p%r.width,y=Math.floor(p/r.width);left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y)}}
- const visibleWidth=right<0?0:right-left+1,visibleHeight=bottom<0?0:bottom-top+1,dpi=visibleWidth*25.4/widthMm,heightMm=visibleWidth?visibleHeight*widthMm/visibleWidth:0;
+ const visibleWidth=right<0?0:right-left+1,visibleHeight=bottom<0?0:bottom-top+1,heightMm=physicalHeightMm??(visibleWidth?visibleHeight*widthMm/visibleWidth:0),dpi=Math.min(visibleWidth*25.4/widthMm,heightMm>0?visibleHeight*25.4/heightMm:0);
  const issues:string[]=[];
  if(!Number.isFinite(widthMm)||widthMm<=0||widthMm>355)issues.push("Choose a print width between 1 and 355 mm.");
  if(!visiblePixels)issues.push("No visible artwork remains. Restore and review the source.");
@@ -16,7 +16,7 @@ export function inspectArtwork(r:Raster,widthMm:number,changedPixels=0,removedBa
 }
 // Based on Prompt to Print's physical-size speck, faint-alpha and edge-blemish
 // processing. All changes are alpha-only or clear RGB on fully removed pixels.
-export function cleanRaster(source:Raster,widthMm:number,removeBackground=true):{raster:Raster;report:Quality}{
+export function cleanRaster(source:Raster,widthMm:number,removeBackground=true,printedHeightMm=hypotheticalHeight(source,widthMm)):{raster:Raster;report:Quality}{
  const {width:w,height:h}=source,n=w*h;if(w<1||h<1||n>25_000_000||source.data.length!==n*4)throw new Error("Image exceeds the 25 megapixel limit or is invalid.");
  const data=new Uint8ClampedArray(source.data),alpha=new Uint8ClampedArray(n);let removedBackdrop=false;
  if(removeBackground){const corners=[0,w-1,(h-1)*w,n-1],first=corners[0]*4;const colour=[data[first],data[first+1],data[first+2]];
@@ -41,16 +41,16 @@ export function cleanRaster(source:Raster,widthMm:number,removeBackground=true):
  // Same physical-size profiles as Prompt to Print repairArtwork at 51b2cf0.
  // The production artwork keeps its native pixels; these are cleanup thresholds,
  // not an upscaler or a guarantee that intentional translucency can be inferred.
- const smallArtwork=widthMm<=60&&h*widthMm/w<=60;
- const mmPerPixel=widthMm/w,tolerance=smallArtwork?1.25:.8,haloThreshold=smallArtwork?96:160;
+ const smallArtwork=widthMm<=60&&printedHeightMm<=60;
+ const mmPerPixel=widthMm/w,yMmPerPixel=printedHeightMm/h,tolerance=smallArtwork?1.25:.8,haloThreshold=smallArtwork?96:160;
  const main=components.reduce<Component|null>((largest,c)=>!largest||c.count>largest.count?c:largest,null);
  if(components.length<=2000)for(const c of components){
   if(c===main)continue;
-  if((c.right-c.left+1)*mmPerPixel>=tolerance||(c.bottom-c.top+1)*mmPerPixel>=tolerance)continue;
-  let gap=Infinity;for(const other of components){if(other.count<=c.count)continue;gap=Math.min(gap,Math.hypot(Math.max(0,c.left-other.right-1,other.left-c.right-1),Math.max(0,c.top-other.bottom-1,other.top-c.bottom-1))*mmPerPixel)}
+  if((c.right-c.left+1)*mmPerPixel>=tolerance||(c.bottom-c.top+1)*yMmPerPixel>=tolerance)continue;
+  let gap=Infinity;for(const other of components){if(other.count<=c.count)continue;gap=Math.min(gap,Math.hypot(Math.max(0,c.left-other.right-1,other.left-c.right-1)*mmPerPixel,Math.max(0,c.top-other.bottom-1,other.top-c.bottom-1)*yMmPerPixel))}
   if(Number.isFinite(gap)&&gap>tolerance)removed.add(c.id);
  }
- const marks=borderBlemishes(alpha,w,h,widthMm,h*widthMm/w);let changed=0,haze=0,specks=0,edges=0,backdrop=0;
+ const marks=borderBlemishes(alpha,w,h,widthMm,printedHeightMm);let changed=0,haze=0,specks=0,edges=0,backdrop=0;
  for(let p=0;p<n;p++){
   const before=data[p*4+3];
   if(before>0){if(removed.has(labels[p])){data[p*4+3]=0;specks++}else if(marks[p]){data[p*4+3]=0;edges++}else if(before<haloThreshold){data[p*4+3]=0;haze++}}
@@ -71,3 +71,5 @@ export function with300Dpi(png:Uint8Array){
  while(offset+12<=png.length){const len=new DataView(png.buffer,png.byteOffset+offset,4).getUint32(0);if(offset+12+len>png.length)throw new Error("Invalid PNG chunks.");const tag=String.fromCharCode(...png.subarray(offset+4,offset+8));if(tag!=="pHYs")pieces.push(png.subarray(offset,offset+len+12));if(tag==="IHDR"){pieces.push(chunk);inserted=true}offset+=len+12}
  if(!inserted)throw new Error("PNG header missing.");const result=new Uint8Array(pieces.reduce((n,p)=>n+p.length,0));let pos=0;for(const p of pieces){result.set(p,pos);pos+=p.length}return result;
 }
+
+function hypotheticalHeight(source:Raster,widthMm:number){return source.height*widthMm/source.width}

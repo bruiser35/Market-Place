@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 import {cleanRaster} from '../lib/artwork';
@@ -28,3 +29,5 @@ test('cleanup pixels and removal counts match the real Prompt to Print repair ac
   }
  }finally{Object.assign(globalThis,prior)}
 });
+
+test('vendored production repair function stays verbatim equal to inspected PTP source',{skip:!process.env.PTP_PROJECT_DIR},async()=>{const source=await readFile(resolve(process.env.PTP_PROJECT_DIR!,'app/artwork-processing.ts'),'utf8'),vendored=await readFile(new URL('../lib/ptp-production-repair.ts',import.meta.url),'utf8');const body=source.slice(source.indexOf('export async function repairArtwork('),source.indexOf('export async function applyGarmentColourKnockout('));assert.equal(vendored.slice(vendored.indexOf('export async function repairArtwork(')),body)});

@@ -35,3 +35,23 @@ test('published previews are public but source PNG remains protected',async()=>{
  assert.equal((await call('assets/'+asset.id,'GET',undefined,{})).status,404);
  await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();assert.equal((await call('assets/'+asset.id,'GET',undefined,{})).status,200);
 });
+
+test('custom categories persist, reject duplicates, and are available only for owner assignment',async()=>{
+ assert.equal((await call('admin/categories','POST',{name:'Motorsport'},buyer)).status,403);
+ assert.equal((await call('admin/categories','POST',{name:'Motorsport'},admin,'https://evil.test')).status,403);
+ const created=await call('admin/categories','POST',{name:'Motorsport'});assert.equal(created.status,201);assert.ok((await created.json() as any).categories.includes('Motorsport'));
+ assert.equal((await call('admin/categories','POST',{name:' motorsport '})).status,400);
+ assert.equal((await call('admin/categories','POST',{name:' '})).status,400);
+ const publicSettings=await (await call('settings','GET',undefined,{})).json() as any;assert.ok(publicSettings.categories.includes('Motorsport'));
+ const product=await call('admin/products','POST',{title:'Custom category original',category:'Motorsport',type:'single',priceCents:250});assert.equal(product.status,201);
+ assert.equal((await call('admin/products','POST',{title:'Invalid category',category:'Not saved',type:'single',priceCents:250})).status,400);
+});
+
+test('Delete rejects customers and stale review, moves only drafts to private trash and hides them from catalogue',async()=>{
+ const made=await call('admin/products','POST',{title:'Rejected draft',category:'Animals',type:'single',priceCents:250}),{id}=await made.json() as any;const row=await env.DB.prepare('SELECT updated_at FROM products WHERE id=?').bind(id).first<any>();
+ assert.equal((await call('admin/products/'+id,'PATCH',{action:'delete',updatedAt:row.updated_at},buyer)).status,403);
+ assert.equal((await call('admin/products/'+id,'PATCH',{action:'delete',updatedAt:0})).status,409);
+ const deleted=await call('admin/products/'+id,'PATCH',{action:'delete',updatedAt:row.updated_at});assert.equal(deleted.status,200);assert.equal((await deleted.json() as any).filesRetained,true);
+ assert.ok(!(await (await call('admin/products')).json() as any).items.some((p:any)=>p.id===id));assert.equal((await call('products/'+id)).status,404);
+ const status=await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>();assert.equal(status.status,'deleted');
+});

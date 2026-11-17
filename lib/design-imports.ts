@@ -2,6 +2,7 @@ import type {Bindings} from './api';
 import {authenticateBridge,limitedBody,sha256,sourceIdFor,validateManifest,validateMetadata,validateVector,EMBEDDING_MODEL,MAX_PNG_BYTES,searchDocument,type ImportManifest} from './bridge-contract';
 import {inspectPng} from './png-inspection';
 import {indexStatements,rateLimit} from './semantic-search';
+import {readCategories} from './categories';
 import {DEFAULT_PRICES,CATEGORIES} from './catalogue';
 const json=(value:unknown,status=200)=>Response.json(value,{status,headers:{'cache-control':'private, no-store'}});
 class ImportError extends Error{constructor(message:string,public status=400){super(message)}}
@@ -26,7 +27,7 @@ export async function receiveDesign(request:Request,env:Bindings){
   const manifest=JSON.parse(row.manifest_json) as ImportManifest;
   if(action==='metadata'&&method==='PUT'){
    if(row.metadata_json)return receipt(db,row);
-   const payload=JSON.parse(new TextDecoder().decode(bytes)),metadata=validateMetadata(payload.metadata),vector=validateVector(payload.vector);if(payload.model!==EMBEDDING_MODEL||!CATEGORIES.slice(1).includes(metadata.category))throw new ImportError('Metadata category or embedding model is invalid.');
+   const payload=JSON.parse(new TextDecoder().decode(bytes)),metadata=validateMetadata(payload.metadata),vector=validateVector(payload.vector);if(payload.model!==EMBEDDING_MODEL||!(await readCategories(env.DB)).slice(1).includes(metadata.category))throw new ImportError('Metadata category or embedding model is invalid.');
    await db.prepare('UPDATE design_imports SET metadata_json=?,vector_json=?,model=?,updated_at=?,last_error=NULL WHERE id=? AND metadata_json IS NULL').bind(JSON.stringify({...metadata,metadataModel:typeof payload.metadataModel==='string'?payload.metadataModel.slice(0,80):'gpt-6-luna'}),JSON.stringify(vector),payload.model,Date.now(),row.id).run();return receipt(db,await db.prepare('SELECT * FROM design_imports WHERE id=?').bind(row.id).first());
   }
   if(isFile&&method==='PUT'){

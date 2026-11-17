@@ -1,3 +1,4 @@
+import {readCategories,addCategory} from './categories';
 import {identity,sameOrigin} from "./auth";
 import {CATEGORIES,DEFAULT_GUIDELINES,DEFAULT_PRICES,cleanText,parsePrice,validId} from "./catalogue";
 import {receiveDesign} from './design-imports';
@@ -21,9 +22,10 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(path==="checkout")return error("PayPal is not connected yet. No payment has been taken.",503);
  if(path.startsWith("admin/")&&!user?.admin)return error("Administrator access is required.",403);
  const log=(action:string,id?:string)=>db.prepare("INSERT INTO audit_log(id,actor,action,entity_id,created_at) VALUES(?,?,?,?,?)").bind(uuid(),user!.id,action,id||null,Date.now());
- const settings=async()=>{const rows=await db.prepare("SELECT key,value FROM settings").all<{key:string;value:string}>();const stored=Object.fromEntries(rows.results.map(r=>[r.key,r.value]));return {prices:stored.prices?JSON.parse(stored.prices):DEFAULT_PRICES,guidelines:stored.guidelines||DEFAULT_GUIDELINES}};
+ const settings=async()=>{const rows=await db.prepare("SELECT key,value FROM settings").all<{key:string;value:string}>();const stored=Object.fromEntries(rows.results.map(r=>[r.key,r.value]));return {categories:stored.categories?JSON.parse(stored.categories):CATEGORIES,prices:stored.prices?JSON.parse(stored.prices):DEFAULT_PRICES,guidelines:stored.guidelines||DEFAULT_GUIDELINES}};
  try{
- if(path==="settings"&&method==="GET"){const s=await settings();return json({prices:s.prices,currency:"AUD",paymentsEnabled:false})}
+ if(path==="settings"&&method==="GET"){const s=await settings();return json({categories:s.categories,prices:s.prices,currency:"AUD",paymentsEnabled:false})}
+ if(path==='admin/categories'&&method==='POST'){const b=await body(request),categories=await addCategory(db,b.name);await log('category.created').run();return json({categories},201)}
  if(path==="admin/settings"){
   if(method==="GET")return json(await settings());
   if(method==="PUT"){const b=await body(request);const pairs:Array<[string,string]>=[];if(b.prices){const prices={single:parsePrice(b.prices.single),pair:parsePrice(b.prices.pair),bundle:parsePrice(b.prices.bundle)};pairs.push(["prices",JSON.stringify(prices)])}if(b.guidelines!==undefined){const text=cleanText(b.guidelines,12000);if(!text)throw new Error("Guidelines cannot be empty.");pairs.push(["guidelines",text])}if(!pairs.length)throw new Error("Choose settings to update.");await db.batch([...pairs.map(([k,v])=>db.prepare("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(k,v,Date.now())),log("settings.updated")]);return json({ok:true})}
@@ -53,8 +55,8 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(path==="admin/summary"&&method==="GET"){
  const [p,a,o,plans]=await Promise.all([db.prepare("SELECT status,count(*) count FROM products GROUP BY status").all(),db.prepare("SELECT count(*) count,coalesce(sum(size),0) bytes FROM assets").first(),db.prepare("SELECT count(*) count,coalesce(sum(total_cents),0) revenue FROM orders WHERE status='paid'").first(),db.prepare("SELECT * FROM collection_plans ORDER BY created_at DESC LIMIT 20").all()]);return json({products:p.results,assets:a,orders:o,plans:plans.results,paymentsEnabled:false})}
  if(path==="admin/products"){
-  if(method==="GET"){const rows=await db.prepare("SELECT p.*,(SELECT metadata_json FROM artwork_metadata m WHERE m.product_id=p.id) metadata_json,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p ORDER BY updated_at DESC LIMIT 200").all();return json({items:rows.results})}
-  if(method==="POST"){const b=await body(request),title=cleanText(b.title,150),category=cleanText(b.category,80),type=cleanText(b.type,10);if(!title||!CATEGORIES.slice(1).includes(category)||!["single","pair","bundle"].includes(type))throw new Error("Choose a title, category and product format.");const id=uuid(),now=Date.now();await db.batch([db.prepare("INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'draft','pending',0,?,?)").bind(id,title,cleanText(b.description,2500),category,type,parsePrice(b.priceCents),cleanText(b.tags,500),now,now),log("product.created",id)]);return json({id},201)}
+  if(method==="GET"){const rows=await db.prepare("SELECT p.*,(SELECT metadata_json FROM artwork_metadata m WHERE m.product_id=p.id) metadata_json,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p WHERE p.status<>'deleted' ORDER BY updated_at DESC LIMIT 200").all();return json({items:rows.results})}
+  if(method==="POST"){const b=await body(request),title=cleanText(b.title,150),category=cleanText(b.category,80),type=cleanText(b.type,10);if(!title||!(await readCategories(db)).slice(1).includes(category)||!["single","pair","bundle"].includes(type))throw new Error("Choose a title, category and product format.");const id=uuid(),now=Date.now();await db.batch([db.prepare("INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'draft','pending',0,?,?)").bind(id,title,cleanText(b.description,2500),category,type,parsePrice(b.priceCents),cleanText(b.tags,500),now,now),log("product.created",id)]);return json({id},201)}
  }
  const adminProduct=path.match(/^admin\/products\/([a-zA-Z0-9-]+)$/);
  const analysisMatch=path.match(/^admin\/products\/([a-zA-Z0-9-]+)\/analyse$/);
@@ -62,14 +64,18 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(adminProduct){const id=adminProduct[1],p=await db.prepare("SELECT * FROM products WHERE id=?").bind(id).first<any>();if(!p)return error("Draft not found.",404);
   if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();const m=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();return json({product:p,assets:a.results,metadata:m?JSON.parse(m.metadata_json):null})}
   if(method==="PATCH"){const b=await body(request);if(b.action==="archive"){await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=?").bind(Date.now(),id),log("product.archived",id)]);return json({ok:true})}
+   if(b.action==='delete'){
+    if(p.status!=='draft')return error('Only unpublished drafts can be deleted here.',409);
+    const removed=await db.batch([db.prepare("UPDATE products SET status='deleted',updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(Math.max(Date.now(),p.updated_at+1),id,b.updatedAt,'analysis:'+id,Date.now()),log('product.trash_requested',id)]);if(!removed[0].meta.changes)return error('The draft changed or analysis is still running. Reopen it before deleting.',409);return json({ok:true,trashed:true,filesRetained:true});
+   }
    if(b.action==='categories'){
     if(p.status!=='draft')return error('Only unpublished drafts can be categorised.',409);
-    const selected=approvedCategories(b.categories);
+    const selected=approvedCategories(b.categories,await readCategories(db));
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
     if(b.updatedAt!==p.updated_at)return error('The draft changed. Reopen it before approving categories.',409);
     const row=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(!row)throw new Error('Analyse this artwork before approving categories.');
     const old=JSON.parse(row.metadata_json),now=Math.max(Date.now(),p.updated_at+1);
-    const metadata={...old,suggestedCategories:categorySuggestions(old),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
+    const metadata={...old,suggestedCategories:categorySuggestions(old,await readCategories(db)),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
     const changes=await db.batch([db.prepare("UPDATE products SET category=?,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(selected[0],now,id,p.updated_at,'analysis:'+id,Date.now()),db.prepare('UPDATE artwork_metadata SET metadata_json=?,search_text=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(metadata),searchDocument(metadata),now,id,id,now),log('categories.approved',id)]);
     if(!changes[0].meta.changes)return error('The draft changed. Reopen it before approving categories.',409);
     return json({ok:true,categories:selected,draftOnly:true});
@@ -77,7 +83,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
    if(b.action==='metadata'){
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
     if(p.status!=='draft')return error('Only unpublished drafts can be edited.',409);
-    const supplied=validateMetadata(b.metadata);if(!CATEGORIES.slice(1).includes(supplied.category))throw new Error('Choose an existing main category.');
+    const supplied=validateMetadata(b.metadata);if(!(await readCategories(db)).slice(1).includes(supplied.category))throw new Error('Choose an existing main category.');
     const previous=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();const old=previous?JSON.parse(previous.metadata_json):{};
     const allowed=['title','description','category','secondaryCategories','subjects','objects','styles','primaryColours','secondaryColours','audience','ageGroup','occasions','moods','themes','keywords','synonyms','garments','personalisation','uncertainties','qualityFlags'];const metadata={...old,...Object.fromEntries(allowed.map(k=>[k,(supplied as any)[k]]))};
     if(metadata.category!==old.category||JSON.stringify(metadata.secondaryCategories)!==JSON.stringify(old.secondaryCategories)){delete metadata.approvedCategories;delete metadata.categoriesApprovedAt;}
