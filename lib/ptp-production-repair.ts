@@ -26,8 +26,39 @@ export async function repairArtwork(source: string, printedWidthMm: number, prin
   context.drawImage(image, 0, 0);
   const pixels = context.getImageData(0, 0, width, height);
   const original = new Uint8ClampedArray(pixels.data);
+  const { alpha, haze, specks, edges } = cleanupArtworkPixels(pixels.data, width, height, printedWidthMm, printedHeightMm);
+  context.putImageData(pixels, 0, 0);
+  const repaired = canvas.toDataURL("image/png");
+  const overlayCanvas = document.createElement("canvas");
+  overlayCanvas.width = width;
+  overlayCanvas.height = height;
+  const overlayContext = overlayCanvas.getContext("2d");
+  if (!overlayContext) throw new Error("Repair highlighting is unavailable in this browser.");
+  const overlay = overlayContext.createImageData(width, height);
+  for (let pixel = 0; pixel < alpha.length; pixel++) {
+    if (alpha[pixel] !== pixels.data[pixel * 4 + 3]) {
+      const offset = pixel * 4;
+      overlay.data[offset] = 255;
+      overlay.data[offset + 1] = 28;
+      overlay.data[offset + 2] = 28;
+      overlay.data[offset + 3] = 220;
+    }
+  }
+  overlayContext.putImageData(overlay, 0, 0);
+  const highlightedCanvas = document.createElement("canvas");
+  highlightedCanvas.width = width;
+  highlightedCanvas.height = height;
+  const highlightedContext = highlightedCanvas.getContext("2d");
+  if (!highlightedContext) throw new Error("Repair highlighting is unavailable in this browser.");
+  const originalImageData = new ImageData(original, width, height);
+  highlightedContext.putImageData(originalImageData, 0, 0);
+  highlightedContext.drawImage(overlayCanvas, 0, 0);
+  return { repaired, highlighted: highlightedCanvas.toDataURL("image/png"), haze, specks, edges };
+}
+
+export function cleanupArtworkPixels(data: Uint8ClampedArray, width: number, height: number, printedWidthMm: number, printedHeightMm: number) {
   const alpha = new Uint8ClampedArray(width * height);
-  for (let pixel = 0; pixel < alpha.length; pixel++) alpha[pixel] = original[pixel * 4 + 3];
+  for (let pixel = 0; pixel < alpha.length; pixel++) alpha[pixel] = data[pixel * 4 + 3];
   let haze = 0;
   let specks = 0;
   let edges = 0;
@@ -91,7 +122,10 @@ export async function repairArtwork(source: string, printedWidthMm: number, prin
       const pixel = y * width + x;
       const offset = pixel * 4;
       const before = alpha[pixel];
-      if (!before) continue;
+      if (!before) {
+        data[offset] = data[offset + 1] = data[offset + 2] = 0;
+        continue;
+      }
       let after = before;
       if (removableSmallSpecks.has(pixel)) {
         after = 0;
@@ -111,40 +145,14 @@ export async function repairArtwork(source: string, printedWidthMm: number, prin
         // channels, joining letters, outlines and intentional cut-throughs.
         after = before;
       }
-      pixels.data[offset + 3] = after;
+      data[offset + 3] = after;
       if (!after) {
-        pixels.data[offset] = 0;
-        pixels.data[offset + 1] = 0;
-        pixels.data[offset + 2] = 0;
+        data[offset] = 0;
+        data[offset + 1] = 0;
+        data[offset + 2] = 0;
       }
     }
   }
-  context.putImageData(pixels, 0, 0);
-  const repaired = canvas.toDataURL("image/png");
-  const overlayCanvas = document.createElement("canvas");
-  overlayCanvas.width = width;
-  overlayCanvas.height = height;
-  const overlayContext = overlayCanvas.getContext("2d");
-  if (!overlayContext) throw new Error("Repair highlighting is unavailable in this browser.");
-  const overlay = overlayContext.createImageData(width, height);
-  for (let pixel = 0; pixel < alpha.length; pixel++) {
-    if (alpha[pixel] !== pixels.data[pixel * 4 + 3]) {
-      const offset = pixel * 4;
-      overlay.data[offset] = 255;
-      overlay.data[offset + 1] = 28;
-      overlay.data[offset + 2] = 28;
-      overlay.data[offset + 3] = 220;
-    }
-  }
-  overlayContext.putImageData(overlay, 0, 0);
-  const highlightedCanvas = document.createElement("canvas");
-  highlightedCanvas.width = width;
-  highlightedCanvas.height = height;
-  const highlightedContext = highlightedCanvas.getContext("2d");
-  if (!highlightedContext) throw new Error("Repair highlighting is unavailable in this browser.");
-  const originalImageData = new ImageData(original, width, height);
-  highlightedContext.putImageData(originalImageData, 0, 0);
-  highlightedContext.drawImage(overlayCanvas, 0, 0);
-  return { repaired, highlighted: highlightedCanvas.toDataURL("image/png"), haze, specks, edges };
+  return { alpha, haze, specks, edges };
 }
 

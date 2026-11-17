@@ -30,8 +30,15 @@ test('both real bridge handlers complete a private front/back transfer, approval
   assert.equal((await (await call(`transfer/${id}/complete`)).json() as any).productId,productId);
   let found=await (await handleApi(new Request('https://printwear.test/api/products?q=car'),env)).json() as any;assert.equal(found.total,0);
   const admin={origin:'https://printwear.test','oai-authenticated-user-id':'owner','oai-authenticated-user-email':'owner@example.com'};
- const categoryDraft=await env.DB.prepare('SELECT updated_at FROM products WHERE id=?').bind(productId).first<any>();await handleApi(new Request('https://printwear.test/api/admin/products/'+productId,{method:'PATCH',headers:admin,body:JSON.stringify({action:'categories',categories:['Everyday Originals','Typography'],updatedAt:categoryDraft.updated_at})}),env);
-  response=await handleApi(new Request('https://printwear.test/api/admin/products/'+productId,{method:'PATCH',headers:admin,body:JSON.stringify({action:'publish',reviewed:true,ownOriginal:true})}),env);assert.equal(response.status,200,await response.clone().text());
+  const categoryDraft=await env.DB.prepare('SELECT updated_at FROM products WHERE id=?').bind(productId).first<any>();
+  const update=(payload:unknown)=>handleApi(new Request('https://printwear.test/api/admin/products/'+productId,{method:'PATCH',headers:admin,body:JSON.stringify(payload)}),env);
+  const categorized=await update({action:'categories',categories:['Everyday Originals','Typography'],updatedAt:categoryDraft.updated_at});
+  assert.equal(categorized.status,200);
+  const {updatedAt}=await categorized.json() as any;
+  assert.equal((await update({action:'publish',reviewed:true,ownOriginal:true,updatedAt:categoryDraft.updated_at})).status,409);
+  response=await update({action:'publish',reviewed:true,ownOriginal:true,updatedAt});
+  assert.equal(response.status,200,await response.clone().text());
+  assert.equal((await (await update({action:'publish',reviewed:true,ownOriginal:true,updatedAt})).json() as any).alreadyPublished,true);
   env.PTP_EMBEDDING_URL='https://prompttoprint.com.au/api/admin/printwear/embedding';found=await (await handleApi(new Request('https://printwear.test/api/search',{method:'POST',headers:{origin:'https://printwear.test'},body:JSON.stringify({q:'Find red racing T-shirt prints'})}),env)).json() as any;assert.equal(found.mode,'semantic');assert.equal(found.items[0].id,productId);assert.equal((await env.DB.prepare('SELECT count(*) count FROM products').first<any>()).count,1);
   const asset=await env.DB.prepare("SELECT * FROM assets WHERE product_id=? AND role='front'").bind(productId).first<any>();assert.equal(await sha256(new Uint8Array(await (await env.FILES.get(asset.object_key))!.arrayBuffer())),files[0].descriptor.sha256);
  }finally{globalThis.fetch=originalFetch;await mf.dispose()}
