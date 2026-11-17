@@ -55,3 +55,22 @@ test('Delete rejects customers and stale review, moves only drafts to private tr
  assert.ok(!(await (await call('admin/products')).json() as any).items.some((p:any)=>p.id===id));assert.equal((await call('products/'+id)).status,404);
  const status=await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>();assert.equal(status.status,'deleted');
 });
+
+test('admin pagination and search surface artwork beyond the newest 200 listings',async()=>{
+ const query="INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,'','Typography','single',250,'','draft','pending',0,1,?)";
+ try{
+  for(let offset=0;offset<204;offset+=20){
+   await env.DB.batch(Array.from({length:Math.min(204-offset,20)},(_,i)=>{
+    const index=offset+i;
+    return env.DB.prepare(query).bind('pagination-test-'+index,index?'Batch fixture '+index:'Batch fixture oldest design',index);
+   }));
+  }
+  const first=await (await call('admin/products?page=1&status=draft&q=batch%20fixture')).json() as any;
+  const last=await (await call('admin/products?page=6&status=draft&q=batch%20fixture')).json() as any;
+  assert.equal(first.total,204);
+  assert.equal(first.items.length,40);
+  assert.equal(last.items.length,4);
+  assert.equal(last.items.at(-1).id,'pagination-test-0');
+  assert.equal((await call('admin/products?page=6&status=draft', 'GET', undefined, buyer)).status,403);
+ }finally{await env.DB.prepare("DELETE FROM products WHERE id LIKE 'pagination-test-%'").run()}
+});

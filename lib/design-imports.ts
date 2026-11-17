@@ -19,7 +19,7 @@ export async function receiveDesign(request:Request,env:Bindings){
    // Original prompt/job labels may change; identical bytes + production settings
    // are one source identity and always return the first receipt.
    const existing=await db.prepare('SELECT * FROM design_imports WHERE source_id=?').bind(manifest.sourceId).first<any>();if(existing)return receipt(db,existing);
-   if(!await rateLimit(db,'import:new',10))throw new ImportError('Import rate limit reached. Try again in a minute.',429);
+   if(!await rateLimit(db,'import:new',24))throw new ImportError('Import rate limit reached. Try again in a minute.',429);
    const id=crypto.randomUUID(),now=Date.now();await db.prepare(`INSERT OR IGNORE INTO design_imports(id,source_id,manifest_hash,manifest_json,status,created_at,updated_at) VALUES(?,?,?,?,'receiving',?,?)`).bind(id,manifest.sourceId,await sha256(JSON.stringify(manifest)),JSON.stringify(manifest),now,now).run();const row=await db.prepare('SELECT * FROM design_imports WHERE source_id=?').bind(manifest.sourceId).first();return receipt(db,row);
   }
   const row=await db.prepare('SELECT * FROM design_imports WHERE id=?').bind(importId).first<any>();if(!row)return json({error:'Import not found.'},404);if(method==='GET')return receipt(db,row);
@@ -35,7 +35,7 @@ export async function receiveDesign(request:Request,env:Bindings){
   if(isFile&&method==='PUT'){
    const side=match[3],file=manifest.files.find(f=>f.side===side);if(!file||bytes.length!==file.bytes||await sha256(bytes)!==file.sha256)throw new ImportError('File differs from the approved manifest.');
    const old=await db.prepare('SELECT id FROM design_import_files WHERE import_id=? AND side=?').bind(row.id,side).first();if(old)return receipt(db,row);
-   if(!await rateLimit(db,'import:files',30))throw new ImportError('Upload rate limit reached.',429);
+   if(!await rateLimit(db,'import:files',48))throw new ImportError('Upload rate limit reached.',429);
    const {report,preview}=await inspectPng(bytes,file.widthMm,file.heightMm,file.nativeDpi,{dimensionBasis:file.dimensionBasis}),key=`design-imports/${row.id}/${side}.png`,previewKey=`design-imports/${row.id}/${side}-preview.png`;
    await env.FILES.put(key,bytes,{httpMetadata:{contentType:'image/png'}});await env.FILES.put(previewKey,preview,{httpMetadata:{contentType:'image/png'}});
    await db.prepare('INSERT OR IGNORE INTO design_import_files(id,import_id,side,object_key,preview_key,sha256,report_json,size,preview_size) VALUES(?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),row.id,side,key,previewKey,file.sha256,JSON.stringify(report),bytes.length,preview.length).run();return receipt(db,row);

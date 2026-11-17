@@ -58,7 +58,35 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(path==="admin/summary"&&method==="GET"){
  const [p,a,o,plans]=await Promise.all([db.prepare("SELECT status,count(*) count FROM products GROUP BY status").all(),db.prepare("SELECT count(*) count,coalesce(sum(size),0) bytes FROM assets").first(),db.prepare("SELECT count(*) count,coalesce(sum(total_cents),0) revenue FROM orders WHERE status='paid'").first(),db.prepare("SELECT * FROM collection_plans ORDER BY created_at DESC LIMIT 20").all()]);return json({products:p.results,assets:a,orders:o,plans:plans.results,paymentsEnabled:false})}
  if(path==="admin/products"){
-  if(method==="GET"){const ids=(url.searchParams.get('ids')||'').split(',').filter(Boolean);if(ids.length>100||ids.some(id=>!validId(id)))throw new Error('Choose up to 100 valid product IDs for batch review.');const query="SELECT p.*,(SELECT metadata_json FROM artwork_metadata m WHERE m.product_id=p.id) metadata_json,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p WHERE p.status<>'deleted'"+(ids.length?' AND p.id IN ('+ids.map(()=>'?').join(',')+')':'')+" ORDER BY updated_at DESC LIMIT 200";const rows=await db.prepare(query).bind(...ids).all();return json({items:rows.results})}
+  if(method==="GET"){
+   const params=url.searchParams;
+   const paged=params.has("page");
+   const page=Math.max(1,Math.min(10000,Math.floor(Number(params.get("page"))||1)));
+   const size=paged?40:200;
+   const filters=["p.status<>'deleted'"];
+   const args:Array<string|number>=[];
+   const ids=(params.get('ids')||'').split(',').filter(Boolean);
+   if(ids.length>100||ids.some(id=>!validId(id)))throw new Error('Choose up to 100 valid product IDs for batch review.');
+   if(ids.length){filters.push('p.id IN ('+ids.map(()=>'?').join(',')+')');args.push(...ids)}
+   const category=params.get("category");
+   if(category&&category!=="All artwork"){
+    filters.push("(p.status='published' AND p.category=? OR EXISTS(SELECT 1 FROM json_each(m.metadata_json,'$.approvedCategories') c WHERE c.value=?))");
+    args.push(category,category);
+   }
+   const status=params.get("status");
+   if(status&&["draft","published","archived"].includes(status)){filters.push("p.status=?");args.push(status)}
+   const q=params.get("q")?.trim().slice(0,150);
+   if(q){
+    filters.push("instr(lower(p.title || ' ' || p.tags || ' ' || coalesce(m.search_text,'')),lower(?))>0");
+    args.push(q);
+   }
+   const from=`FROM products p LEFT JOIN artwork_metadata m ON m.product_id=p.id WHERE ${filters.join(" AND ")}`;
+   const select="SELECT p.*,m.metadata_json,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back";
+   const rows=await db.prepare(`${select} ${from} ORDER BY p.updated_at DESC,p.id LIMIT ? OFFSET ?`).bind(...args,size,paged?(page-1)*size:0).all();
+   if(!paged)return json({items:rows.results});
+   const total=await db.prepare("SELECT count(*) count "+from).bind(...args).first<{count:number}>();
+   return json({items:rows.results,page,pageSize:size,total:total?.count||0});
+  }
   if(method==="POST"){const b=await body(request),title=cleanText(b.title,150),category=cleanText(b.category,80),type=cleanText(b.type,10);if(!title||!(await readCategories(db)).slice(1).includes(category)||!["single","pair","bundle"].includes(type))throw new Error("Choose a title, category and product format.");const id=uuid(),now=Date.now();await db.batch([db.prepare("INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'draft','pending',0,?,?)").bind(id,title,cleanText(b.description,2500),category,type,parsePrice(b.priceCents),cleanText(b.tags,500),now,now),log("product.created",id)]);return json({id},201)}
  }
  const adminProduct=path.match(/^admin\/products\/([a-zA-Z0-9-]+)$/);
@@ -82,7 +110,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     const metadata={...old,...(b.etsyPath===undefined?{}:{etsySelectedPath:b.etsyPath||null,etsyTaxonomySource:ETSY_TAXONOMY.source,etsyTaxonomyCheckedAt:ETSY_TAXONOMY.retrievedAt}),suggestedCategories:categorySuggestions(old,await readCategories(db)),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
     const changes=await db.batch([db.prepare("UPDATE products SET category=?,price_cents=?,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(selected[0],b.priceCents===undefined?p.price_cents:parsePrice(b.priceCents),now,id,p.updated_at,'analysis:'+id,Date.now()),db.prepare('UPDATE artwork_metadata SET metadata_json=?,search_text=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(metadata),searchDocument(metadata),now,id,id,now),log('categories.approved',id)]);
     if(!changes[0].meta.changes)return error('The draft changed. Reopen it before approving categories.',409);
-    return json({ok:true,categories:selected,draftOnly:true});
+    return json({ok:true,categories:selected,draftOnly:true,updatedAt:now});
    }
    if(b.action==='metadata'){
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
@@ -95,6 +123,8 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     await db.batch([db.prepare('UPDATE products SET title=?,description=?,category=?,tags=?,price_cents=?,updated_at=? WHERE id=?').bind(metadata.title,metadata.description,metadata.category,[...metadata.keywords,...metadata.synonyms].join(', ').slice(0,500),b.priceCents===undefined?p.price_cents:parsePrice(b.priceCents),now,id),db.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,received_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(product_id) DO UPDATE SET metadata_json=excluded.metadata_json,search_text=excluded.search_text,updated_at=excluded.updated_at').bind(id,JSON.stringify(metadata),document,now,now),...indexStatements(db,id,vector,await sha256(document)),log('metadata.updated',id)]);return json({ok:true});
    }
    if(b.action==="publish"){
+    if(p.status==='published')return json({ok:true,alreadyPublished:true});
+    if(p.status!=='draft'||(b.updatedAt!==undefined&&b.updatedAt!==p.updated_at))return error("The draft changed. Reopen it before approving.",409);
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish before approval.',409);
     if(!b.reviewed||!b.ownOriginal)throw new Error("Confirm visual review and original artwork ownership.");
     const {results:a}=await db.prepare("SELECT role,width,height,report_json FROM assets WHERE product_id=?").bind(id).all<any>();
@@ -102,7 +132,6 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     if(!sides.length)throw new Error("Bundle publication will be enabled with the first verified bundle.");
     let lowDpi=false;for(const side of sides){const file=a.find(x=>x.role===side),preview=a.find(x=>x.role===`preview_${side}`),source=a.find(x=>x.role===`source_${side}`);if(!file||!preview||!source)throw new Error(`Missing ${side} master, cleaned PNG or preview.`);const r=JSON.parse(file.report_json);const checked=publicationQuality(r);if(checked.blocked)throw new Error(`The ${side} artwork needs quality review. Low DPI alone does not block approval.`);lowDpi ||= checked.lowDpi}
     const attached=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(attached&&!JSON.parse(attached.metadata_json).categoriesApprovedAt)throw new Error('Approve the artwork category checkboxes before catalogue publication.');if(attached&&JSON.parse(attached.metadata_json).qualityFlags?.length)throw new Error('Review and resolve the AI image-check flags before approval.');if(env.PTP_EMBEDDING_URL){if(!attached)throw new Error('Run AI Catalogue analysis and review the saved metadata before approval.');await indexProduct(env,p,JSON.parse(attached.metadata_json))}
-    if(p.status==='published')return json({ok:true,alreadyPublished:true});
     const approvedAt=Math.max(Date.now(),p.updated_at+1);const committed=await db.batch([db.prepare("UPDATE products SET status='published',quality=?,rights_confirmed=1,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(lowDpi?'approved_low_dpi':'approved',approvedAt,id,p.updated_at,'analysis:'+id,Date.now()),log("product.approval_requested",id)]);if(!committed[0].meta.changes)return error('The draft changed during review. Reopen it before approving.',409);await log(lowDpi?'product.approved_low_dpi':'product.approved',id).run();return json({ok:true,lowDpiWarning:lowDpi})
    }return error("Unknown catalogue action.")
   }
