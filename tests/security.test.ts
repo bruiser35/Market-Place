@@ -74,3 +74,19 @@ test('admin pagination and search surface artwork beyond the newest 200 listings
   assert.equal((await call('admin/products?page=6&status=draft', 'GET', undefined, buyer)).status,403);
  }finally{await env.DB.prepare("DELETE FROM products WHERE id LIKE 'pagination-test-%'").run()}
 });
+test('owner can explicitly accept exact AI warnings; stale review and customer acceptance are rejected',async()=>{
+ const created=await call('admin/products','POST',{title:'Warning review fixture',category:'Typography',type:'single',priceCents:250});const {id}=await created.json() as any;
+ const flags=['Crown is close to the top edge; inspect the original.'];
+ const metadata={qualityFlags:flags,categoriesApprovedAt:new Date().toISOString()};
+ await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,received_at,updated_at) VALUES(?,?,?,?)').bind(id,JSON.stringify(metadata),1,1).run();
+ const report={ready:true,dpi:300,widthMm:100,heightMm:100,visiblePixels:100,transparentPixels:100,issues:[]};
+ for(const role of ['front','source_front','preview_front'])await env.DB.prepare('INSERT INTO assets(id,product_id,role,object_key,file_name,mime,size,sha256,report_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,role,id+'/'+role,'fixture.png','image/png',100,'fixture',JSON.stringify(report),1).run();
+ const snapshot=await (await call('admin/products/'+id)).json() as any;
+ const approval={action:'publish',reviewed:true,ownOriginal:true,acceptAiWarnings:true,acceptedAiFlags:flags,updatedAt:snapshot.product.updated_at};
+ assert.equal((await call('admin/products/'+id,'PATCH',approval,buyer)).status,403);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...approval,updatedAt:0})).status,409);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...approval,acceptedAiFlags:['different flag']})).status,400);
+ assert.equal((await call('admin/products/'+id,'PATCH',approval)).status,200);
+ const saved=await (await call('admin/products/'+id)).json() as any;
+ assert.equal(saved.product.status,'published');assert.deepEqual(saved.metadata.qualityFlags,flags);assert.deepEqual(saved.metadata.aiWarningAcceptance.flags,flags);
+});
