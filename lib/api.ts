@@ -111,7 +111,12 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     const metadata=row?JSON.parse(row.metadata_json):{},assigned=[...new Set([p.category,...(metadata.approvedCategories||[])])] as string[];
     if(!assigned.includes(category))return error('This image is not listed in that category.',409);
     const remaining=assigned.filter(value=>value!==category);
-    if(!remaining.length)return error('This is the image’s only category. Move it to another category first.',400);
+    if(!remaining.length){
+     const now=Math.max(Date.now(),p.updated_at+1);
+     const removed=await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=? AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(now,id,b.updatedAt,'analysis:'+id,Date.now()),...(row?[db.prepare('UPDATE artwork_metadata SET metadata_json=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify({...metadata,approvedCategories:[],secondaryCategories:[],suggestedCategories:[],categoriesApprovedAt:new Date(now).toISOString()}),now,id,id,now)]:[]),log('product.last_category_removed',id)]);
+     if(!removed[0].meta.changes)return error('The listing changed or analysis is running. Refresh and try again.',409);
+     return json({ok:true,categories:[],archived:true,filesRetained:true});
+    }
     const now=Math.max(Date.now(),p.updated_at+1),next={...metadata,category:remaining[0],secondaryCategories:remaining.slice(1),suggestedCategories:(metadata.suggestedCategories||remaining).filter((value:string)=>value!==category),approvedCategories:remaining,categoriesApprovedAt:new Date(now).toISOString()};
     const changed=await db.batch([db.prepare("UPDATE products SET category=?,updated_at=? WHERE id=? AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(remaining[0],now,id,b.updatedAt,'analysis:'+id,Date.now()),...(row?[db.prepare('UPDATE artwork_metadata SET metadata_json=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(next),now,id,id,now)]:[]),log('product.category_removed',id)]);
     if(!changed[0].meta.changes)return error('The listing changed or analysis is running. Refresh and try again.',409);

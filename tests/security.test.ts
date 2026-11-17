@@ -120,7 +120,7 @@ test('removing an image from admin hides only the admin row and preserves its cu
  const adminRows=await (await call('admin/products?ids='+id)).json() as any;assert.equal(adminRows.items.length,0);
  assert.equal((await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>()).status,'published');
 });
-test('remove from one category preserves other customer listings and rejects removing the last category',async()=>{
+test('category deletion preserves other listings and archives the final placement without deleting files',async()=>{
  const made=await call('admin/products','POST',{title:'Multiple category fixture',category:'Animals',type:'single',priceCents:250}),{id}=await made.json() as any;
  await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();
  await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,received_at,updated_at) VALUES(?,?,1,1)').bind(id,JSON.stringify({category:'Animals',approvedCategories:['Animals','Typography'],qualityFlags:[]})).run();
@@ -132,5 +132,8 @@ test('remove from one category preserves other customer listings and rejects rem
  const remaining=await (await call('admin/products/'+id)).json() as any;
  assert.equal(remaining.product.status,'published');assert.equal(remaining.product.category,'Typography');assert.deepEqual(remaining.metadata.approvedCategories,['Typography']);
  assert.equal((await call('products/'+id)).status,200);
- assert.equal((await call('admin/products/'+id,'PATCH',{...payload,category:'Typography',updatedAt:remaining.product.updated_at})).status,400);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...payload,category:'Typography',updatedAt:remaining.product.updated_at})).status,200);
+ assert.equal((await call('products/'+id)).status,404);
+ assert.equal((await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>()).status,'archived');
+ assert.ok(await env.DB.prepare('SELECT product_id FROM artwork_metadata WHERE product_id=?').bind(id).first());
 });
