@@ -1,3 +1,4 @@
+import {suggestEtsyPaths} from './etsy-taxonomy';
 import {readCategories} from './categories';
 import {CATEGORIES} from './catalogue';
 import type {Bindings} from './api';
@@ -11,7 +12,7 @@ export async function analyseProduct(env:Bindings,id:string,prompt:string,siteOr
  const connection=new URL(env.PTP_EMBEDDING_URL);if(connection.origin!=='https://prompttoprint.com.au'||connection.pathname!=='/api/admin/printwear/embedding')throw new Error('The AI service connection is invalid.');
  const files=await db.prepare("SELECT * FROM assets WHERE product_id=? AND role IN ('front','back') ORDER BY role").bind(id).all<any>();if(!files.results.length||(p.type==='pair'&&files.results.length!==2))throw new Error('Save the finished PNG for every required side before analysis.');
  const availableCategories=await readCategories(db);
- const inputHash=await sha256(JSON.stringify({categories:availableCategories,files:files.results.map(f=>({side:f.role,hash:f.sha256})),prompt}));const previous=await db.prepare('SELECT * FROM artwork_metadata WHERE product_id=?').bind(id).first<any>();const old=previous?JSON.parse(previous.metadata_json):{};
+ const inputHash=await sha256(JSON.stringify({etsyTaxonomy:'public-2026-11-17',categories:availableCategories,files:files.results.map(f=>({side:f.role,hash:f.sha256})),prompt}));const previous=await db.prepare('SELECT * FROM artwork_metadata WHERE product_id=?').bind(id).first<any>();const old=previous?JSON.parse(previous.metadata_json):{};
  if(old.analysisInputHash===inputHash)return {ok:true,alreadyAnalysed:true,metadata:old};
  if(!await rateLimit(db,'analysis:minute',5))throw new Error('AI analysis is busy. Try again in a minute.');
  const now=Date.now(),leaseKey='analysis:'+id;const claimed=await db.prepare(`INSERT INTO bridge_rate_limits(key,window,count) VALUES(?,?,1) ON CONFLICT(key) DO UPDATE SET window=excluded.window,count=bridge_rate_limits.count+1 WHERE bridge_rate_limits.window<? RETURNING count`).bind(leaseKey,now+180000,now).first<{count:number}>();if(!claimed)throw new Error('This draft is already being analysed. Retry shortly.');
@@ -30,6 +31,7 @@ export async function analyseProduct(env:Bindings,id:string,prompt:string,siteOr
   // custom categories from that analysis; suggestions still need owner approval.
   const suggestions:string[]=[];for(let i=0;i<custom.length;i+=4){const scored=await Promise.all(custom.slice(i,i+4).map(async category=>{try{return {category,score:cosine(vector,await queryEmbedding(env,'Digital artwork category: '+category))}}catch{return {category,score:0}}}));suggestions.push(...scored.filter(r=>r.score>=.30).map(r=>r.category))}
   (full as any).suggestedCategories=[metadata.category,...metadata.secondaryCategories,...suggestions];
+  (full as any).etsyListingRecommendations=await suggestEtsyPaths(env,metadata);delete (full as any).etsySelectedPath;
   const document=searchDocument(metadata);
   await db.batch([db.prepare('UPDATE products SET title=?,description=?,category=?,tags=?,quality=?,updated_at=? WHERE id=?').bind(metadata.title,metadata.description,metadata.category,[...metadata.keywords,...metadata.synonyms].join(', ').slice(0,500),'pending',at,id),db.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,source_id,source_site,source_created_at,received_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(product_id) DO UPDATE SET metadata_json=excluded.metadata_json,search_text=excluded.search_text,updated_at=excluded.updated_at').bind(id,JSON.stringify(full),document,full.sourceId,full.sourceSite,full.sourceCreatedAt,p.created_at,at),...reports.map(r=>db.prepare('UPDATE assets SET report_json=? WHERE id=?').bind(JSON.stringify(r.report),r.id)),...indexStatements(db,id,vector,await sha256(document)),db.prepare('INSERT INTO audit_log(id,actor,action,entity_id,created_at) VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),'admin:catalogue','artwork.analysed',id,at)]);
   return {ok:true,metadata:full,draftOnly:true};

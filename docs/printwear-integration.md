@@ -172,3 +172,15 @@ Artwork Prep now places **AI fill form & suggest categories** directly beneath e
 ## Worker fetch compatibility fix
 
 Production logs identified `redirect: error` as unsupported by Cloudflare Workers, failing analysis before it reached the AI bridge. PrintWear analysis/embedding calls and the PTP bridge's two OpenAI calls now use `manual`; non-success responses (including redirects) are rejected without following credential-bearing requests elsewhere. A regression test executes both actual handlers inside separate workerd isolates, with D1/R2, signed cross-worker fetch and only external OpenAI responses substituted. It verifies title/description persistence and custom-category embedding calls. Analysis failures remain visible next to the Artwork Prep button, and retries reuse saved drafts.
+
+## Etsy category investigation and recommendations
+
+Source: Etsy's official “Complete Etsy Category List”, https://www.etsy.com/help/categories/seller, retrieved 17 November 2026. The full published hierarchy was extracted: 3,065 unique paths under 15 roots, including all intermediate categories and subcategories. `lib/etsy-categories.json` is a dated snapshot; it is not a live API taxonomy and contains no numeric seller-taxonomy IDs. Etsy's authenticated seller-taxonomy endpoint is needed for official numeric IDs or automated refresh; no Etsy credentials are currently configured. Official authentication reference: https://developer.etsy.com/documentation/essentials/authentication/ .
+
+All paths are searchable in Admin → Manage categories and in artwork review. They remain separate from PrintWear's own browsing categories. Image analysis uses AI embeddings to rank appropriate digital-art categories (Digital, Digital Prints, Clip Art & Image Files), with a clearly labelled product-type fallback if matching is unavailable. A picture of a vehicle or T-shirt is still sold as a PNG, not the depicted physical object. All 3,065 paths can be chosen manually. Approval validates and saves the chosen path and snapshot source/date with the image metadata. No Etsy listing is created and no Etsy account is modified. Etsy advises selecting the most specific category describing what the item is: https://www.etsy.com/seller-handbook/article/362857340643 .
+
+## Back-only catalogue preview fix
+
+Storefront cards now initialise the detail panel to Front only when a front preview exists; back-only products open Back. The displayed preview also falls back to whichever saved watermarked preview exists. This fixes the empty shirt placeholder despite a working catalogue thumbnail. Dialog Escape handling runs in the window capture phase and initial focus no longer scrolls the page. Close and backdrop-click controls remain available in embedded previews.
+
+Storefront image clicks now open a large viewport-fitting artwork viewer rather than the narrow shopping drawer. It shows the available front/back, supports side selection, fit/100/200/400% zoom, pan/scroll, light/dark background, a visible close button and Escape when the preview has focus. Public viewing continues to use the protected watermarked preview assets, not private sale masters.

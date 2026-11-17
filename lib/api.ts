@@ -1,4 +1,5 @@
 import {readCategories,addCategory} from './categories';
+import {validEtsyPath,ETSY_TAXONOMY} from './etsy-taxonomy-data';
 import {publicationQuality} from './publication-quality';
 import {identity,sameOrigin} from "./auth";
 import {CATEGORIES,DEFAULT_GUIDELINES,DEFAULT_PRICES,cleanText,parsePrice,validId} from "./catalogue";
@@ -75,8 +76,9 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
     if(b.updatedAt!==p.updated_at)return error('The draft changed. Reopen it before approving categories.',409);
     const row=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(!row)throw new Error('Analyse this artwork before approving categories.');
+    if(b.etsyPath!==undefined&&b.etsyPath!==''&&!validEtsyPath(b.etsyPath))throw new Error('Choose a category from the verified Etsy list.');
     const old=JSON.parse(row.metadata_json),now=Math.max(Date.now(),p.updated_at+1);
-    const metadata={...old,suggestedCategories:categorySuggestions(old,await readCategories(db)),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
+    const metadata={...old,...(b.etsyPath===undefined?{}:{etsySelectedPath:b.etsyPath||null,etsyTaxonomySource:ETSY_TAXONOMY.source,etsyTaxonomyCheckedAt:ETSY_TAXONOMY.retrievedAt}),suggestedCategories:categorySuggestions(old,await readCategories(db)),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
     const changes=await db.batch([db.prepare("UPDATE products SET category=?,price_cents=?,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(selected[0],b.priceCents===undefined?p.price_cents:parsePrice(b.priceCents),now,id,p.updated_at,'analysis:'+id,Date.now()),db.prepare('UPDATE artwork_metadata SET metadata_json=?,search_text=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(metadata),searchDocument(metadata),now,id,id,now),log('categories.approved',id)]);
     if(!changes[0].meta.changes)return error('The draft changed. Reopen it before approving categories.',409);
     return json({ok:true,categories:selected,draftOnly:true});
