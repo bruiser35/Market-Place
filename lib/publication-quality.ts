@@ -6,3 +6,10 @@ export function publicationQuality(r:any){
  const blocked=!Number.isFinite(r.dpi)||r.dpi<=0||!(r.transparentPixels>0)||!(r.visiblePixels>0)||!Number.isFinite(r.widthMm)||r.widthMm<=0||r.widthMm>355||!Number.isFinite(r.heightMm)||r.heightMm<=0||r.heightMm>550||issues.some(v=>!resolutionIssue(v))||(!r.ready&&!issues.length);
  return {lowDpi,blocked};
 }
+export function productionWarnings(assets:any[]):string[]{
+ return assets.filter(a=>a.role==='front'||a.role==='back').sort((a,b)=>a.role.localeCompare(b.role)).flatMap(a=>{
+  const r=typeof a.report_json==='string'?JSON.parse(a.report_json):a.report_json;
+  return (Array.isArray(r?.issues)?r.issues:[]).filter((issue:unknown):issue is string=>typeof issue==='string'&&!/^Insufficient original detail[: ]|^Effective source resolution is below 300 DPI/.test(issue)).map((issue:string)=>`${a.role}: ${issue}`);
+ });
+}
+export function productionHardBlocked(r:any){return !Number.isFinite(r.dpi)||r.dpi<=0||!(r.transparentPixels>0)||!(r.visiblePixels>0)||!Number.isFinite(r.widthMm)||r.widthMm<=0||r.widthMm>355||!Number.isFinite(r.heightMm)||r.heightMm<=0||r.heightMm>550||(!r.ready&&(!Array.isArray(r.issues)||!r.issues.length))}

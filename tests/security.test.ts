@@ -86,7 +86,11 @@ test('owner can explicitly accept exact AI warnings; stale review and customer a
  assert.equal((await call('admin/products/'+id,'PATCH',approval,buyer)).status,403);
  assert.equal((await call('admin/products/'+id,'PATCH',{...approval,updatedAt:0})).status,409);
  assert.equal((await call('admin/products/'+id,'PATCH',{...approval,acceptedAiFlags:['different flag']})).status,400);
- assert.equal((await call('admin/products/'+id,'PATCH',approval)).status,200);
+ const edge='Artwork touches the canvas edge. Check for clipping and add transparent margins.';
+ await env.DB.prepare("UPDATE assets SET report_json=? WHERE product_id=? AND role='front'").bind(JSON.stringify({...report,ready:false,issues:[edge]}),id).run();
+ assert.equal((await call('admin/products/'+id,'PATCH',approval)).status,400);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...approval,acceptProductionWarnings:true,acceptedProductionWarnings:['wrong']})).status,400);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...approval,acceptProductionWarnings:true,acceptedProductionWarnings:['front: '+edge]})).status,200);
  const saved=await (await call('admin/products/'+id)).json() as any;
- assert.equal(saved.product.status,'published');assert.deepEqual(saved.metadata.qualityFlags,flags);assert.deepEqual(saved.metadata.aiWarningAcceptance.flags,flags);
+ assert.equal(saved.product.status,'published');assert.deepEqual(saved.metadata.qualityFlags,flags);assert.deepEqual(saved.metadata.aiWarningAcceptance.flags,flags);assert.deepEqual(saved.metadata.productionWarningAcceptance.warnings,['front: '+edge]);
 });
