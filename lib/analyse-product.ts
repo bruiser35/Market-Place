@@ -1,3 +1,4 @@
+import {autoCategory} from './auto-category';
 import {suggestEtsyPaths} from './etsy-taxonomy';
 import {readCategories} from './categories';
 import {CATEGORIES} from './catalogue';
@@ -24,6 +25,7 @@ export async function analyseProduct(env:Bindings,id:string,prompt:string,siteOr
   const response=await fetch(connection.origin+path,{method:'POST',headers:{...headers,'content-type':'application/json'},body:payload,redirect:'manual',signal:AbortSignal.timeout(90000)});if(!response.ok)throw new Error('AI analysis is unavailable. Your saved draft and original files are unchanged.');const result=await response.json() as any;
   const metadata=validateMetadata(result.metadata),vector=validateVector(result.vector);if(!CATEGORIES.slice(1).includes(metadata.category))throw new Error('AI returned an unsupported category.');if(result.model!==EMBEDDING_MODEL)throw new Error('The semantic model does not match the catalogue.');
   const current=await db.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>();if(current?.status!=='draft')throw new Error('The listing changed during analysis. Reopen it before retrying.');
+  await autoCategory(db,metadata);
   const at=Math.max(Date.now(),p.updated_at+1),full={...old,...metadata,artworkId:id,sourceId:old.sourceId||`printwear-${id}`,sourceSite:old.sourceSite||siteOrigin,sourceCreatedAt:old.sourceCreatedAt||null,receivedAt:old.receivedAt||new Date(p.created_at).toISOString(),originalGenerationPrompt:old.originalGenerationPrompt||prompt,analysisBrief:prompt,dimensions:reports.map((r,i)=>({side:files.results[i].role,...r.report as object})),analysedAt:new Date(at).toISOString(),analysisInputHash:inputHash,metadataModel:result.metadataModel||'not recorded',embeddingModel:EMBEDDING_MODEL};
   delete (full as any).approvedCategories;delete (full as any).categoriesApprovedAt;(full as any).suggestedCategories=[metadata.category,...metadata.secondaryCategories];
   const custom=availableCategories.filter(c=>!CATEGORIES.includes(c));
