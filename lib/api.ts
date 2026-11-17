@@ -4,6 +4,7 @@ import {receiveDesign} from './design-imports';
 import {semanticResults,rateLimit,indexProduct,indexStatements,queryEmbedding} from './semantic-search';
 import {validateMetadata,searchDocument,sha256} from './bridge-contract';
 import {analyseProduct} from './analyse-product';
+import {approvedCategories,categorySuggestions,CATEGORY_FILTER} from './category-approval';
 export type Bindings={DB:D1Database;FILES:R2Bucket;ADMIN_EMAILS?:string;PRINTWEAR_IMPORT_SECRET?:string;PTP_EMBEDDING_URL?:string;PRINTWEAR_METADATA_MODEL?:string;PRINTWEAR_AI_REQUESTS_PER_DAY?:string;PRINTWEAR_ANALYSES_PER_DAY?:string};
 const json=(data:unknown,status=200)=>Response.json(data,{status,headers:{"cache-control":"private, no-store"}});
 const error=(message:string,status=400)=>json({error:message},status);
@@ -32,7 +33,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
   const q=(params.get("q")||"").trim().slice(0,300),category=params.get("category")||"All artwork",type=params.get("type")||"all",page=Math.floor(Math.max(1,Math.min(10000,Number(params.get("page"))||1)));
   const words=q.toLowerCase().replace(/[.,!?]/g,' ').split(/\s+/).filter(w=>w.length>2&&!['t-shirt','t-shirts','tee','tees','digital','image','images','print','show','find','want','with','some','design','designs','artwork','prints','looking','please','shirt','that','the','and','for'].includes(w)).slice(0,8).map(w=>w.slice(0,40));
   const clauses=["p.status='published'"];const args:unknown[]=[];
-  if(category!=="All artwork"){clauses.push("p.category=?");args.push(category)}if(type!=="all"){clauses.push("p.type=?");args.push(type)}
+  if(category!=="All artwork"){clauses.push(CATEGORY_FILTER);args.push(category,category)}if(type!=="all"){clauses.push("p.type=?");args.push(type)}
   let semantic:Array<{id:string;score:number}>=[],mode='keyword',searchNotice:string|null=null;
   if(path==='search'&&q&&env.PTP_EMBEDDING_URL){
    const key=await sha256(user?.id||request.headers.get('cf-connecting-ip')||'anonymous');
@@ -52,7 +53,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(path==="admin/summary"&&method==="GET"){
  const [p,a,o,plans]=await Promise.all([db.prepare("SELECT status,count(*) count FROM products GROUP BY status").all(),db.prepare("SELECT count(*) count,coalesce(sum(size),0) bytes FROM assets").first(),db.prepare("SELECT count(*) count,coalesce(sum(total_cents),0) revenue FROM orders WHERE status='paid'").first(),db.prepare("SELECT * FROM collection_plans ORDER BY created_at DESC LIMIT 20").all()]);return json({products:p.results,assets:a,orders:o,plans:plans.results,paymentsEnabled:false})}
  if(path==="admin/products"){
-  if(method==="GET"){const rows=await db.prepare("SELECT p.*,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p ORDER BY updated_at DESC LIMIT 200").all();return json({items:rows.results})}
+  if(method==="GET"){const rows=await db.prepare("SELECT p.*,(SELECT metadata_json FROM artwork_metadata m WHERE m.product_id=p.id) metadata_json,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_front') preview_front,(SELECT id FROM assets a WHERE a.product_id=p.id AND a.role='preview_back') preview_back FROM products p ORDER BY updated_at DESC LIMIT 200").all();return json({items:rows.results})}
   if(method==="POST"){const b=await body(request),title=cleanText(b.title,150),category=cleanText(b.category,80),type=cleanText(b.type,10);if(!title||!CATEGORIES.slice(1).includes(category)||!["single","pair","bundle"].includes(type))throw new Error("Choose a title, category and product format.");const id=uuid(),now=Date.now();await db.batch([db.prepare("INSERT INTO products(id,title,description,category,type,price_cents,tags,status,quality,rights_confirmed,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'draft','pending',0,?,?)").bind(id,title,cleanText(b.description,2500),category,type,parsePrice(b.priceCents),cleanText(b.tags,500),now,now),log("product.created",id)]);return json({id},201)}
  }
  const adminProduct=path.match(/^admin\/products\/([a-zA-Z0-9-]+)$/);
@@ -61,12 +62,25 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(adminProduct){const id=adminProduct[1],p=await db.prepare("SELECT * FROM products WHERE id=?").bind(id).first<any>();if(!p)return error("Draft not found.",404);
   if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();const m=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();return json({product:p,assets:a.results,metadata:m?JSON.parse(m.metadata_json):null})}
   if(method==="PATCH"){const b=await body(request);if(b.action==="archive"){await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=?").bind(Date.now(),id),log("product.archived",id)]);return json({ok:true})}
+   if(b.action==='categories'){
+    if(p.status!=='draft')return error('Only unpublished drafts can be categorised.',409);
+    const selected=approvedCategories(b.categories);
+    const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
+    if(b.updatedAt!==p.updated_at)return error('The draft changed. Reopen it before approving categories.',409);
+    const row=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(!row)throw new Error('Analyse this artwork before approving categories.');
+    const old=JSON.parse(row.metadata_json),now=Math.max(Date.now(),p.updated_at+1);
+    const metadata={...old,suggestedCategories:categorySuggestions(old),category:selected[0],secondaryCategories:selected.slice(1),approvedCategories:selected,categoriesApprovedAt:new Date(now).toISOString()};
+    const changes=await db.batch([db.prepare("UPDATE products SET category=?,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(selected[0],now,id,p.updated_at,'analysis:'+id,Date.now()),db.prepare('UPDATE artwork_metadata SET metadata_json=?,search_text=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify(metadata),searchDocument(metadata),now,id,id,now),log('categories.approved',id)]);
+    if(!changes[0].meta.changes)return error('The draft changed. Reopen it before approving categories.',409);
+    return json({ok:true,categories:selected,draftOnly:true});
+   }
    if(b.action==='metadata'){
     const active=await db.prepare('SELECT window FROM bridge_rate_limits WHERE key=?').bind('analysis:'+id).first<{window:number}>();if(active&&active.window>Date.now())return error('Wait for artwork analysis to finish.',409);
     if(p.status!=='draft')return error('Only unpublished drafts can be edited.',409);
     const supplied=validateMetadata(b.metadata);if(!CATEGORIES.slice(1).includes(supplied.category))throw new Error('Choose an existing main category.');
     const previous=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();const old=previous?JSON.parse(previous.metadata_json):{};
     const allowed=['title','description','category','secondaryCategories','subjects','objects','styles','primaryColours','secondaryColours','audience','ageGroup','occasions','moods','themes','keywords','synonyms','garments','personalisation','uncertainties','qualityFlags'];const metadata={...old,...Object.fromEntries(allowed.map(k=>[k,(supplied as any)[k]]))};
+    if(metadata.category!==old.category||JSON.stringify(metadata.secondaryCategories)!==JSON.stringify(old.secondaryCategories)){delete metadata.approvedCategories;delete metadata.categoriesApprovedAt;}
     const document=searchDocument(metadata),vector=await queryEmbedding(env,document),now=Date.now();
     await db.batch([db.prepare('UPDATE products SET title=?,description=?,category=?,tags=?,price_cents=?,updated_at=? WHERE id=?').bind(metadata.title,metadata.description,metadata.category,[...metadata.keywords,...metadata.synonyms].join(', ').slice(0,500),b.priceCents===undefined?p.price_cents:parsePrice(b.priceCents),now,id),db.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,received_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(product_id) DO UPDATE SET metadata_json=excluded.metadata_json,search_text=excluded.search_text,updated_at=excluded.updated_at').bind(id,JSON.stringify(metadata),document,now,now),...indexStatements(db,id,vector,await sha256(document)),log('metadata.updated',id)]);return json({ok:true});
    }
@@ -77,7 +91,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
     const sides=p.type==="pair"?["front","back"]:p.type==="single"?a.some(x=>x.role==="front")?["front"]:["back"]:[];
     if(!sides.length)throw new Error("Bundle publication will be enabled with the first verified bundle.");
     for(const side of sides){const file=a.find(x=>x.role===side),preview=a.find(x=>x.role===`preview_${side}`),source=a.find(x=>x.role===`source_${side}`);if(!file||!preview||!source)throw new Error(`Missing ${side} master, cleaned PNG or preview.`);const r=JSON.parse(file.report_json);if(!r.ready||r.dpi<299.5||r.transparentPixels<=0||r.visiblePixels<=0||r.widthMm>355)throw new Error(`The ${side} artwork needs quality review or more resolution.`)}
-    const attached=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(attached&&JSON.parse(attached.metadata_json).qualityFlags?.length)throw new Error('Review and resolve the AI image-check flags before approval.');if(env.PTP_EMBEDDING_URL){if(!attached)throw new Error('Run AI Catalogue analysis and review the saved metadata before approval.');await indexProduct(env,p,JSON.parse(attached.metadata_json))}
+    const attached=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();if(attached&&!JSON.parse(attached.metadata_json).categoriesApprovedAt)throw new Error('Approve the artwork category checkboxes before catalogue publication.');if(attached&&JSON.parse(attached.metadata_json).qualityFlags?.length)throw new Error('Review and resolve the AI image-check flags before approval.');if(env.PTP_EMBEDDING_URL){if(!attached)throw new Error('Run AI Catalogue analysis and review the saved metadata before approval.');await indexProduct(env,p,JSON.parse(attached.metadata_json))}
     if(p.status==='published')return json({ok:true,alreadyPublished:true});
     const approvedAt=Math.max(Date.now(),p.updated_at+1);const committed=await db.batch([db.prepare("UPDATE products SET status='published',quality='approved',rights_confirmed=1,updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(approvedAt,id,p.updated_at,'analysis:'+id,Date.now()),log("product.approval_requested",id)]);if(!committed[0].meta.changes)return error('The draft changed during review. Reopen it before approving.',409);await log('product.approved',id).run();return json({ok:true})
    }return error("Unknown catalogue action.")

@@ -130,3 +130,9 @@ Sources checked 17 November 2026 Brisbane: https://developers.openai.com/api/doc
 7. If acceptance fails, return to the previous code versions and remove/disable only the newly added integration values. Preserve additive tables and production records; a code rollback is not a database rollback. Rotate the bridge secret if compromised. Any test-listing archival/removal requires the owner's instruction.
 
 The master brief says: “Do not overwrite production credentials or modify live production data without explicit approval.” Deployment is held until approval because it applies live schema changes. Existing Sites are unchanged while this work is prepared.
+
+## Admin image inbox and category approval
+
+Open **Admin → Image inbox & AI** to drop PNG, JPEG, WebP or a front/back ZIP. This uses the existing automatic cleanup and print-size review; save the selected front/back as a draft with analysis enabled to generate metadata. The review opens automatically. Use **Select all AI suggestions** or individual category checkboxes, then **Approve categories & save**. The first selection is the primary category. The draft becomes visible in every approved category in the admin Catalogue, with thumbnail previews. **View in category** opens that folder. Final visual/ownership approval is still required for storefront visibility.
+
+Multiple category memberships live in the existing artwork metadata record, so no database migration or duplicate image copies are needed. Only approved secondary categories affect public category filtering. Unsupported AI category names cannot become memberships. Saved category approval is invalidated by reanalysis or classification edits; stale category reviews receive HTTP 409. Category approval itself does not require another AI request. Original master files remain private, and checkout remains disabled.

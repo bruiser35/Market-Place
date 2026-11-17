@@ -41,6 +41,7 @@ test('front/back import is resumable, byte-preserving, private and idempotent th
  const all=await env.DB.prepare('SELECT * FROM assets WHERE product_id=?').bind(product.id).all<any>();assert.equal(all.results.length,6);
  for(const [side,bytes] of [['front',front],['back',back]] as const){const asset=all.results.find(a=>a.role===side);assert.equal(await sha256(new Uint8Array(await (await env.FILES.get(asset.object_key))!.arrayBuffer())),await sha256(bytes));assert.equal((await handleApi(new Request('https://printwear.test/api/assets/'+asset.id),env)).status,404)}
  const before=await (await handleApi(new Request('https://printwear.test/api/products?q=car'),env)).json() as any;assert.equal(before.total,0);
+ const categoryDraft=await env.DB.prepare('SELECT updated_at FROM products WHERE id=?').bind(product.id).first<any>();await handleApi(new Request('https://printwear.test/api/admin/products/'+product.id,{method:'PATCH',headers:admin,body:JSON.stringify({action:'categories',categories:['Everyday Originals','Typography'],updatedAt:categoryDraft.updated_at})}),env);
  r=await handleApi(new Request('https://printwear.test/api/admin/products/'+product.id,{method:'PATCH',headers:admin,body:JSON.stringify({action:'publish',reviewed:true,ownOriginal:true})}),env);assert.equal(r.status,200);
  const publicResult=await (await handleApi(new Request('https://printwear.test/api/products?q=show%20me%20muscle%20cars'),env)).json() as any;assert.equal(publicResult.items[0].id,product.id);
  const originalFetch=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({model:EMBEDDING_MODEL,vector})};
@@ -58,4 +59,24 @@ test('admin AI Catalogue analysis attaches category, quality review and embeddin
   const attached=await env.DB.prepare('SELECT * FROM artwork_metadata WHERE product_id=?').bind(id).first<any>();assert.ok(attached.search_text.includes('muscle car'));assert.equal(JSON.parse(attached.metadata_json).sourceSite,'https://printwear.test');assert.ok(await env.DB.prepare('SELECT product_id FROM catalogue_embeddings WHERE product_id=?').bind(id).first());
   const file=await env.DB.prepare("SELECT object_key FROM assets WHERE product_id=? AND role='front'").bind(id).first<any>();assert.equal(await sha256(new Uint8Array(await (await env.FILES.get(file.object_key))!.arrayBuffer())),await sha256(source));
  }finally{globalThis.fetch=fetchBefore;delete env.PTP_EMBEDDING_URL}
+});
+
+test('category approval is owner-only, explicit, multi-category and private until publication',async()=>{
+ const made=await handleApi(new Request('https://printwear.test/api/admin/products',{method:'POST',headers:admin,body:JSON.stringify({title:'Category fixture',category:'Animals',type:'single',priceCents:250})}),env);const {id}=await made.json() as any;
+ const source=png(),report=(await inspectPng(source,30,30,600)).report;for(const role of ['source_front','front','preview_front'])await handleApi(new Request(`https://printwear.test/api/admin/products/${id}/assets/${role}`,{method:'PUT',headers:{...admin,'content-type':'image/png','x-artwork-report':JSON.stringify(report)},body:source as unknown as BodyInit}),env);
+ const at=Date.now();await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,received_at,updated_at) VALUES(?,?,?,?,?)').bind(id,JSON.stringify({...metadata,category:'Animals',secondaryCategories:['Christmas']}),'category fixture',at,at).run();
+ const patch=(data:any,headers=admin)=>handleApi(new Request(`https://printwear.test/api/admin/products/${id}`,{method:'PATCH',headers,body:JSON.stringify(data)}),env);
+ assert.equal((await patch({action:'publish',reviewed:true,ownOriginal:true})).status,400,'category suggestions do not imply approval');
+ const row=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first<any>();const input={action:'categories',categories:['Animals','Christmas'],updatedAt:row.updated_at};
+ assert.equal((await patch(input,{origin:'https://printwear.test'} as any)).status,403);
+ assert.equal((await patch({...input,categories:[]})).status,400);
+ assert.equal((await patch({...input,categories:['Invented category']})).status,400);
+ assert.equal((await patch({...input,updatedAt:0})).status,409);
+ assert.equal((await patch(input)).status,200);assert.equal((await patch(input)).status,409,'stale reviews cannot overwrite saved categories');
+ let detail=await (await handleApi(new Request(`https://printwear.test/api/admin/products/${id}`,{headers:admin}),env)).json() as any;assert.deepEqual(detail.metadata.approvedCategories,['Animals','Christmas']);assert.equal(detail.product.status,'draft');
+ for(const category of ['Animals','Christmas']){const r=await handleApi(new Request('https://printwear.test/api/products?category='+encodeURIComponent(category)),env);assert.ok(!(await r.json() as any).items.some((p:any)=>p.id===id),'draft not public in any category')}
+ assert.equal((await patch({action:'publish',reviewed:true,ownOriginal:true})).status,200);
+ for(const category of ['Animals','Christmas']){const r=await handleApi(new Request('https://printwear.test/api/products?category='+encodeURIComponent(category)),env);assert.ok((await r.json() as any).items.some((p:any)=>p.id===id),'approved listing appears in each category')}
+ const other=await handleApi(new Request('https://printwear.test/api/products?category=Birthdays'),env);assert.ok(!(await other.json() as any).items.some((p:any)=>p.id===id));
+ assert.equal((await env.DB.prepare('SELECT count(*) count FROM products WHERE id=?').bind(id).first<any>()).count,1,'categories share one product');
 });
