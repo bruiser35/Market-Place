@@ -162,3 +162,5 @@ The uploaded Production and Search Rules v1.2 document is reference material: it
 ## Owner-approved low-resolution artwork
 
 Per the owner's instruction, effective DPI below 300 is a visible warning rather than a publication blocker. Saved per-side measurements remain unchanged. Quick Review displays each low-DPI side and print dimensions. Approval records `approved_low_dpi` and a distinct audit event; catalogue cards and product details retain a low-resolution notice. No pixel interpolation, artificial detail, or changed DPI measurements are introduced. Missing/empty artwork, invalid dimensions, transparency/clipping issues and unresolved non-resolution quality issues still block publication.
+
+Quick Review explicitly shows the AI title and description plus an editable AUD price. Price starts from the saved format default, not an AI-invented valuation. Approve validates and saves the displayed price atomically with category approval before publication.

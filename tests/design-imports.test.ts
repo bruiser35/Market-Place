@@ -67,13 +67,13 @@ test('category approval is owner-only, explicit, multi-category and private unti
  const at=Date.now();await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,search_text,received_at,updated_at) VALUES(?,?,?,?,?)').bind(id,JSON.stringify({...metadata,category:'Animals',secondaryCategories:['Christmas']}),'category fixture',at,at).run();
  const patch=(data:any,headers=admin)=>handleApi(new Request(`https://printwear.test/api/admin/products/${id}`,{method:'PATCH',headers,body:JSON.stringify(data)}),env);
  assert.equal((await patch({action:'publish',reviewed:true,ownOriginal:true})).status,400,'category suggestions do not imply approval');
- const row=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first<any>();const input={action:'categories',categories:['Animals','Christmas'],updatedAt:row.updated_at};
+ const row=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first<any>();const input={action:'categories',categories:['Animals','Christmas'],priceCents:375,updatedAt:row.updated_at};
  assert.equal((await patch(input,{origin:'https://printwear.test'} as any)).status,403);
  assert.equal((await patch({...input,categories:[]})).status,400);
  assert.equal((await patch({...input,categories:['Invented category']})).status,400);
  assert.equal((await patch({...input,updatedAt:0})).status,409);
  assert.equal((await patch(input)).status,200);assert.equal((await patch(input)).status,409,'stale reviews cannot overwrite saved categories');
- let detail=await (await handleApi(new Request(`https://printwear.test/api/admin/products/${id}`,{headers:admin}),env)).json() as any;assert.deepEqual(detail.metadata.approvedCategories,['Animals','Christmas']);assert.equal(detail.product.status,'draft');
+ let detail=await (await handleApi(new Request(`https://printwear.test/api/admin/products/${id}`,{headers:admin}),env)).json() as any;assert.deepEqual(detail.metadata.approvedCategories,['Animals','Christmas']);assert.equal(detail.product.status,'draft');assert.equal(detail.product.price_cents,375);
  for(const category of ['Animals','Christmas']){const r=await handleApi(new Request('https://printwear.test/api/products?category='+encodeURIComponent(category)),env);assert.ok(!(await r.json() as any).items.some((p:any)=>p.id===id),'draft not public in any category')}
  assert.equal((await patch({action:'publish',reviewed:true,ownOriginal:true})).status,200);
  for(const category of ['Animals','Christmas']){const r=await handleApi(new Request('https://printwear.test/api/products?category='+encodeURIComponent(category)),env);assert.ok((await r.json() as any).items.some((p:any)=>p.id===id),'approved listing appears in each category')}
