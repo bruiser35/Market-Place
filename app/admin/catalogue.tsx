@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ImagePlus, Images } from "lucide-react";
 import { categorySuggestions } from "@/lib/category-approval";
 import { money } from "@/lib/catalogue";
+import ArtworkActions from './artwork-actions';
 import { api } from "@/lib/client";
 
 type Listing = {
@@ -163,7 +164,7 @@ export default function Catalogue({ categories, category, setCategory, refreshKe
           <td><span className={`quality-tag ${item.status === "published" ? "pass" : ""}`}>{item.status.toUpperCase()}</span>
             {item.status === "draft" && metadata?.qualityFlags?.length > 0 && <div className="low-dpi-note"><strong>AI review needed</strong><ul>{metadata.qualityFlags.map((flag:string,index:number)=><li key={index}>{flag}</li>)}</ul></div>}
             {item.quality === "approved_low_dpi" && <small className="low-dpi-note">Low DPI · owner approved</small>}</td>
-          <td><button type="button" className="text-link" disabled={disabled} onClick={() => onReview(item.id)}>Open review <ArrowUpRight size={14} /></button></td>
+          <td><button type="button" className="text-link" disabled={disabled} onClick={() => onReview(item.id)}>Open review <ArrowUpRight size={14} /></button><ArtworkActions id={item.id} title={item.title} categories={categories} disabled={disabled} onChanged={()=>setReload(v=>v+1)}/></td>
         </tr>;
       })}</tbody>
     </table></div>}

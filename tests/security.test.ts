@@ -94,3 +94,18 @@ test('owner can explicitly accept exact AI warnings; stale review and customer a
  const saved=await (await call('admin/products/'+id)).json() as any;
  assert.equal(saved.product.status,'published');assert.deepEqual(saved.metadata.qualityFlags,flags);assert.deepEqual(saved.metadata.aiWarningAcceptance.flags,flags);assert.deepEqual(saved.metadata.productionWarningAcceptance.warnings,['front: '+edge]);
 });
+test('owner can move and trash published artwork; customers and stale edits are denied',async()=>{
+ const created=await call('admin/products','POST',{title:'Movable fixture',category:'Animals',type:'single',priceCents:250}),{id}=await created.json() as any;
+ await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();
+ await env.DB.prepare('INSERT INTO artwork_metadata(product_id,metadata_json,received_at,updated_at) VALUES(?,?,1,1)').bind(id,JSON.stringify({category:'Animals',approvedCategories:['Animals','Typography']})).run();
+ const snapshot=await (await call('admin/products/'+id)).json() as any;
+ const move={action:'move',category:'Typography',updatedAt:snapshot.product.updated_at};
+ assert.equal((await call('admin/products/'+id,'PATCH',move,buyer)).status,403);
+ assert.equal((await call('admin/products/'+id,'PATCH',{...move,updatedAt:0})).status,409);
+ assert.equal((await call('admin/products/'+id,'PATCH',move)).status,200);
+ const moved=await (await call('admin/products/'+id)).json() as any;
+ assert.equal(moved.product.status,'published');assert.equal(moved.product.category,'Typography');assert.deepEqual(moved.metadata.approvedCategories,['Typography']);
+ assert.equal((await call('admin/products/'+id,'PATCH',{action:'delete',updatedAt:moved.product.updated_at})).status,200);
+ assert.equal((await call('products/'+id)).status,404);
+ assert.ok(await env.DB.prepare('SELECT product_id FROM artwork_metadata WHERE product_id=?').bind(id).first());
+});

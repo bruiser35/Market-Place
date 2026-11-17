@@ -96,8 +96,17 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
   if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();const m=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();return json({product:p,assets:a.results,metadata:m?JSON.parse(m.metadata_json):null})}
   if(method==="PATCH"){const b=await body(request);if(b.action==="archive"){await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=?").bind(Date.now(),id),log("product.archived",id)]);return json({ok:true})}
    if(b.action==='delete'){
-    if(p.status!=='draft')return error('Only unpublished drafts can be deleted here.',409);
-    const removed=await db.batch([db.prepare("UPDATE products SET status='deleted',updated_at=? WHERE id=? AND status='draft' AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(Math.max(Date.now(),p.updated_at+1),id,b.updatedAt,'analysis:'+id,Date.now()),log('product.trash_requested',id)]);if(!removed[0].meta.changes)return error('The draft changed or analysis is still running. Reopen it before deleting.',409);return json({ok:true,trashed:true,filesRetained:true});
+    if(!['draft','published','archived'].includes(p.status))return error('This listing is already in private trash.',409);
+    const removed=await db.batch([db.prepare("UPDATE products SET status='deleted',updated_at=? WHERE id=? AND status IN ('draft','published','archived') AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(Math.max(Date.now(),p.updated_at+1),id,b.updatedAt,'analysis:'+id,Date.now()),log('product.trash_requested',id)]);if(!removed[0].meta.changes)return error('The draft changed or analysis is still running. Reopen it before deleting.',409);return json({ok:true,trashed:true,filesRetained:true});
+   }
+   if(b.action==='move'){
+    if(!['draft','published','archived'].includes(p.status))return error('Restore this listing before moving it.',409);
+    const category=approvedCategories([b.category],await readCategories(db))[0];
+    const row=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();
+    const metadata=row?JSON.parse(row.metadata_json):null,now=Math.max(Date.now(),p.updated_at+1);
+    const moved=await db.batch([db.prepare("UPDATE products SET category=?,updated_at=? WHERE id=? AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(category,now,id,b.updatedAt,'analysis:'+id,Date.now()),...(metadata?[db.prepare('UPDATE artwork_metadata SET metadata_json=?,updated_at=? WHERE product_id=? AND EXISTS(SELECT 1 FROM products WHERE id=? AND updated_at=?)').bind(JSON.stringify({...metadata,category,secondaryCategories:[],suggestedCategories:[category],approvedCategories:[category],categoriesApprovedAt:new Date(now).toISOString()}),now,id,id,now)]:[]),log('product.category_moved',id)]);
+    if(!moved[0].meta.changes)return error('The listing changed or analysis is running. Refresh before moving it.',409);
+    return json({ok:true,category,status:p.status});
    }
    if(b.action==='categories'){
     if(p.status!=='draft')return error('Only unpublished drafts can be categorised.',409);

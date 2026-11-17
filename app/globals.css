@@ -30,3 +30,4 @@
 .finished-intake-guide{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:22px}.finished-intake-guide p{font-size:12px;line-height:1.8}
 
 .batch-approval-controls{padding:18px;border:1px solid var(--line);border-radius:10px;margin:18px 0;background:#f4f7ec}.batch-approval-controls p{font-size:12px;line-height:1.7;margin-top:8px}.batch-description{font-size:11px;line-height:1.7;max-width:420px;margin-top:8px}.catalogue-table td:first-child input[type=checkbox]{width:17px;height:17px}
+.artwork-admin-actions{margin-top:12px;text-align:left;font-size:12px;max-width:100%}.artwork-admin-actions summary{cursor:pointer;padding:8px 0;font-weight:600}.artwork-admin-actions label{display:block}.artwork-admin-actions select{max-width:100%;margin:6px 0}.artwork-admin-actions .button{margin:6px 0}.artwork-admin-actions p{white-space:normal;max-width:32rem}
