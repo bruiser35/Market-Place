@@ -109,3 +109,14 @@ test('owner can move and trash published artwork; customers and stale edits are 
  assert.equal((await call('products/'+id)).status,404);
  assert.ok(await env.DB.prepare('SELECT product_id FROM artwork_metadata WHERE product_id=?').bind(id).first());
 });
+test('removing an image from admin hides only the admin row and preserves its customer listing',async()=>{
+ const made=await call('admin/products','POST',{title:'Admin removal fixture',category:'Animals',type:'single',priceCents:250}),{id}=await made.json() as any;
+ await env.DB.prepare("UPDATE products SET status='published' WHERE id=?").bind(id).run();
+ const snapshot=await (await call('admin/products/'+id)).json() as any;
+ const payload={action:'hide-admin',updatedAt:snapshot.product.updated_at};
+ assert.equal((await call('admin/products/'+id,'PATCH',payload,buyer)).status,403);
+ assert.equal((await call('admin/products/'+id,'PATCH',payload)).status,200);
+ const listing=await (await call('products/'+id)).json() as any;assert.equal(listing.product.id,id);
+ const adminRows=await (await call('admin/products?ids='+id)).json() as any;assert.equal(adminRows.items.length,0);
+ assert.equal((await env.DB.prepare('SELECT status FROM products WHERE id=?').bind(id).first<any>()).status,'published');
+});

@@ -63,7 +63,7 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
    const paged=params.has("page");
    const page=Math.max(1,Math.min(10000,Math.floor(Number(params.get("page"))||1)));
    const size=paged?40:200;
-   const filters=["p.status<>'deleted'"];
+   const filters=["p.status<>'deleted'", "NOT EXISTS(SELECT 1 FROM settings hidden WHERE hidden.key='admin-hidden:' || p.id)"];
    const args:Array<string|number>=[];
    const ids=(params.get('ids')||'').split(',').filter(Boolean);
    if(ids.length>100||ids.some(id=>!validId(id)))throw new Error('Choose up to 100 valid product IDs for batch review.');
@@ -95,6 +95,11 @@ export async function handleApi(request:Request,env:Bindings):Promise<Response>{
  if(adminProduct){const id=adminProduct[1],p=await db.prepare("SELECT * FROM products WHERE id=?").bind(id).first<any>();if(!p)return error("Draft not found.",404);
   if(method==="GET"){const a=await db.prepare("SELECT * FROM assets WHERE product_id=? ORDER BY role").bind(id).all();const m=await db.prepare('SELECT metadata_json FROM artwork_metadata WHERE product_id=?').bind(id).first<{metadata_json:string}>();return json({product:p,assets:a.results,metadata:m?JSON.parse(m.metadata_json):null})}
   if(method==="PATCH"){const b=await body(request);if(b.action==="archive"){await db.batch([db.prepare("UPDATE products SET status='archived',updated_at=? WHERE id=?").bind(Date.now(),id),log("product.archived",id)]);return json({ok:true})}
+   if(b.action==='hide-admin'){
+    if(b.updatedAt!==p.updated_at)return error('The listing changed. Refresh before removing it from admin.',409);
+    await db.prepare("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind('admin-hidden:'+id,JSON.stringify({hiddenAt:new Date().toISOString(),catalogueRetained:true}),Date.now()).run();
+    await log('product.hidden_from_admin',id).run();return json({ok:true,catalogueRetained:true,filesRetained:true});
+   }
    if(b.action==='delete'){
     if(!['draft','published','archived'].includes(p.status))return error('This listing is already in private trash.',409);
     const removed=await db.batch([db.prepare("UPDATE products SET status='deleted',updated_at=? WHERE id=? AND status IN ('draft','published','archived') AND updated_at=? AND NOT EXISTS(SELECT 1 FROM bridge_rate_limits WHERE key=? AND window>?)").bind(Math.max(Date.now(),p.updated_at+1),id,b.updatedAt,'analysis:'+id,Date.now()),log('product.trash_requested',id)]);if(!removed[0].meta.changes)return error('The draft changed or analysis is still running. Reopen it before deleting.',409);return json({ok:true,trashed:true,filesRetained:true});
