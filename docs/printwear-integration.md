@@ -168,3 +168,7 @@ Quick Review explicitly shows the AI title and description plus an editable AUD 
 ## Inspect first, then AI-fill on Artwork Prep
 
 Artwork Prep now places **AI fill form & suggest categories** directly beneath each original/cleaned image pair. The default waits for this explicit click after cleanup; automatic post-cleanup analysis is now opt-in. Clicking uses the selected front/back pair when that image is selected, otherwise that individual image. It saves privately, analyses, fills the prep form fields and opens Approve / Delete. Approve files the artwork into its approved categories. A per-workspace selection-to-draft map lets repeated clicks reuse the saved draft instead of creating duplicate listings. Saved starting prices are retained; AI does not invent prices.
+
+## Worker fetch compatibility fix
+
+Production logs identified `redirect: error` as unsupported by Cloudflare Workers, failing analysis before it reached the AI bridge. PrintWear analysis/embedding calls and the PTP bridge's two OpenAI calls now use `manual`; non-success responses (including redirects) are rejected without following credential-bearing requests elsewhere. A regression test executes both actual handlers inside separate workerd isolates, with D1/R2, signed cross-worker fetch and only external OpenAI responses substituted. It verifies title/description persistence and custom-category embedding calls. Analysis failures remain visible next to the Artwork Prep button, and retries reuse saved drafts.
