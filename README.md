@@ -45,3 +45,7 @@ Auto checks must pass, both required sides and previews must exist, and the owne
 ## Before public sales
 
 Complete PayPal sandbox capture/webhook/refund/entitlement implementation, approved customer authentication, final licence/privacy/business/tax details, backup/restore ownership, rate-limit and operational monitoring, and print-sample validation. Add semantic search and generation services only after explicit provider and cost configuration. No automatic generation or advertising is scheduled.
+
+## Prepared integration release
+
+The `feature/ptp-artwork-import` branch adds signed Prompt to Print imports, owner-only AI Catalogue analysis, attached metadata/quality flags, shared semantic indexing and opt-in browser voice search. It is prepared for review and not activated on the live sites. See [integration and activation notes](docs/printwear-integration.md).
